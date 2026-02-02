@@ -2535,22 +2535,129 @@ class VectorGeometry:
         cos_th = np.dot(d1,d2)/(nd1*nd2)
         return np.arccos(cos_th)
     
+
     @jit(nopython=True,fastmath=True)
-    def calc_dihedral(r1,r2,r3,r4):
-        """Compute dihedral angle 1-2-3-4 in radians."""
-        d1 = r2-r1
-        d2 = r3-r2
-        d3 = r4-r3
-        c1 = np.cross(d1,d2)
-        c2 = np.cross(d2,d3)
-        n1 = c1/np.sqrt(np.dot(c1,c1))
-        n2 = c2/np.sqrt(np.dot(c2,c2))
-        m1= np.cross(n1,d2/np.sqrt(np.dot(d2,d2)))
-        x= np.dot(n1,n2)
-        y= np.dot(m1,n2)
-        dihedral = np.arctan2(y, x)
-        return dihedral
-            
+    def derivative_normalized_vector(c):
+        norm = np.linalg.norm(c)
+        n = c / norm
+        I = np.eye(3)
+        return (1 / norm) * (I - np.outer(n, n))
+    @jit(nopython=True,fastmath=True)
+    def derivative_cross_product_wrt_first(u, v):
+        # Returns the skew-symmetric matrix of v
+        vx = np.array([
+            [0, v[2], -v[1]],
+            [-v[2], 0, v[0]],
+            [v[1], -v[0], 0]
+        ])
+        return vx
+    @jit(nopython=True,fastmath=True)
+    def derivative_cross_product_wrt_second(u, v):
+        # Returns the negative skew-symmetric matrix of u
+        ux = np.array([
+            [0, -u[2], u[1]],
+            [u[2], 0, -u[0]],
+            [-u[1], u[0], 0]
+        ])
+        return ux
+    
+    @jit(nopython=True,fastmath=True)
+    def calc_dihedral(p0, p1, p2, p3):
+        b1 = p1 - p0
+        b2 = p2 - p1
+        b3 = p3 - p2
+    
+        n1 = np.cross(b1, b2)
+        n2 = np.cross(b2, b3)
+    
+        m1 = np.cross(n1, b2 / np.linalg.norm(b2))
+    
+        x = np.dot(n1, n2)
+        y = np.dot(m1, n2)
+    
+        return np.arctan2(y, x)
+    
+    @jit(nopython=True,fastmath=True)
+    def normalize(c):
+        norm = np.linalg.norm(c)
+        return c / norm
+    
+    @jit(forceobj=True)
+    def calc_dihedral_grad(ri, rj, rk, rl):
+        b1 = rj - ri
+        b2 = rk - rj
+        b3 = rl - rk
+        
+        n1 = np.cross(b1, b2)
+        n2 = np.cross(b2, b3)
+        nb2 = VectorGeometry.normalize(b2)
+        m1 = np.cross(n1, nb2)
+    
+        x = np.dot(n1, n2)
+        y = np.dot(m1, n2)
+        
+        grad = np.zeros((4,3),dtype=np.float64)
+        
+        dwdx = -y/(x**2+y**2)
+        dwdy = x/(x**2+y**2)
+        
+        # dwdri calculation
+        dxdn1= n2
+        dydm1 = n2
+        
+        
+        dm1dn1 = VectorGeometry.derivative_cross_product_wrt_first(n1, nb2)
+        
+        dn1db1 = VectorGeometry.derivative_cross_product_wrt_first(b1, b2)
+        dwdm1 = dwdy*dydm1.T
+        db1dri = -1
+        dwdn1 = dwdx*dxdn1.T + np.dot(dwdm1,dm1dn1).T 
+        
+        dwdb1 = np.dot(dwdn1,dn1db1)
+        grad[0] = dwdb1*db1dri
+        
+        
+        # dwdrj calculation
+        
+        db1drj = 1
+        db2drj = -1
+        
+        T1 = dwdb1*db1drj
+        
+        dn1db2 = VectorGeometry.derivative_cross_product_wrt_second(b1, b2) 
+        T21 = np.dot(dwdn1, dn1db2)
+        
+        dn2db2 = VectorGeometry.derivative_cross_product_wrt_first(b2, b3)
+        dxdn2= n1
+        dydn2 = m1
+        dwdn2 = (dwdx*dxdn2 + dwdy*dydn2).T
+        T22 = np.dot(dwdn2, dn2db2)
+        
+        dnb2db2 = VectorGeometry.derivative_normalized_vector(b2)
+        dm1dnb2 = VectorGeometry.derivative_cross_product_wrt_second(n1, nb2)
+        
+        dwdnb2 = np.dot(dwdm1,dm1dnb2).T     
+        T23 = np.dot(dwdnb2,dnb2db2)
+        
+        dwdb2 = T21 + T22 + T23
+        
+        grad[1] = T1 + dwdb2*db2drj
+        
+        #dwdrk calculation
+        db2drk = 1 
+        db3drk = -1 
+        
+        dwdb3 = VectorGeometry.derivative_cross_product_wrt_second(b2, b3)
+        dwdb3 = np.dot(dwdn2,dwdb3)
+        A1 = dwdb2*db2drk 
+        A2 = dwdb3*db3drk
+        grad[2] = A1 + A2 
+        
+        #dwdrl caclulation
+        db3drl = 1
+        grad[3] = dwdb3*db3drl
+        
+        return grad
 
 class MathAssist:
     """Mathematical helper functions for combinatorics and array operations."""
