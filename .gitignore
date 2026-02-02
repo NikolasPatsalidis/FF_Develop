@@ -1,0 +1,12 @@
+# Ignore everything
+*
+
+# Keep specific files
+!.gitignore
+!FF_Develop.py
+!lammpsreader.py
+
+
+# Keep tests
+!Tools
+!Tools/*.py
