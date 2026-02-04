@@ -5153,13 +5153,13 @@ class Interactions():
             for neib in neibs[k[0]]:
                 if neib in k: continue
                 ang_id ,ang_type = Interactions.sorted_id_and_type(types,(neib,k[0],k[1]))
-                if ang_id[::-1] not in angles.keys():
+                if ang_id not in angles.keys():
                     angles[ang_id] = ang_type
             #"right" side angles k[1]
             for neib in neibs[k[1]]:
                 if neib in k: continue
                 ang_id ,ang_type = Interactions.sorted_id_and_type(types,(k[0],k[1],neib))
-                if ang_id[::-1] not in angles.keys():
+                if ang_id not in angles.keys():
                     angles[ang_id] = ang_type  
         tf = perf_counter()
         logger.info('angles time --> {:.3e} sec'.format(tf-t0))
@@ -5182,15 +5182,17 @@ class Interactions():
             #"left" side dihedrals k[0]
             for neib in neibs[k[0]]:
                 if neib in k: continue
-                dih_id,dih_type = Interactions.sorted_id_and_type(types,(neib,k[0],k[1],k[2]))
-                if dih_id[::-1] not in dihedrals:
+                dih_id, dih_type = Interactions.sorted_id_and_type(types, (neib,k[0],k[1],k[2]))
+                
+                if dih_id not in dihedrals:
                     dihedrals[dih_id] = dih_type
             #"right" side dihedrals k[2]
             for neib in neibs[k[2]]:
                 if neib in k: continue
-                dih_id,dih_type = Interactions.sorted_id_and_type(types,(k[0],k[1],k[2],neib))
-                if dih_id[::-1] not in dihedrals:
+                dih_id, dih_type = Interactions.sorted_id_and_type(types, (k[0],k[1],k[2],neib))
+                if dih_id not in dihedrals:
                     dihedrals[dih_id] = dih_type
+        
         tf = perf_counter()
         logger.debug('dihedrals time --> {:.3e} sec'.format(tf-t0))
         return dihedrals
@@ -5199,14 +5201,22 @@ class Interactions():
     def sorted_id_and_type(types,a_id):
         """Return canonically ordered atom IDs and types for an interaction."""
         t = [types[i] for i in a_id]
+        
         if t[0] <= t[-1]:
-            t = tuple(t)
+            reverse = False
+            if len(t)==4:
+                if  t[2]<t[1] and t[0]==t[-1]:
+                    reverse = True
         else:
+            reverse = True
+        
+        if reverse:
             t = tuple(t[::-1])
-        if a_id[0]<=a_id[-1]:
-            a_id = tuple(a_id)
-        else:
             a_id = tuple(a_id[::-1])
+        else:
+            t = tuple(t)
+            a_id=tuple(a_id)
+
         return a_id,t
     
     @staticmethod
@@ -5873,6 +5883,7 @@ class Interactions():
                         j_index = np.empty(npairs,dtype=int)
                         k_index = np.empty(npairs,dtype=int)
                         l_index = np.empty(npairs,dtype=int)
+                        
                         for ip,p in enumerate(pairs):
                             i, j, k, l = p
                             r1 = np.array(ac[i]) ; 
