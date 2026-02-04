@@ -45,6 +45,128 @@ import collections
 import six
 
 import lammpsreader as lammps_reader
+
+class Parsers():
+    def __init__(self, filename, **kwargs):
+        self.filename = filename
+        self.kwargs = kwargs
+        return
+        
+    def nameit(self):
+        if 'name' in self.kwargs:
+            self.data['sys_name'] = self.kwargs['name']
+        else:
+            self.data['sys_name'] = [self.chemistry(s) for s in self.data['at_type'].to_list() ]
+    def chemistry(self,at_types):
+        count = {t:0 for t in np.unique(at_types)}
+        for at in at_types:
+            count[at] += 1
+        name = ''
+        for t,c in count.items():
+            name +=t+str(c)
+        return name
+
+    def natoms(self):
+        self.data['natoms'] = [len(at) for at in self.data['at_type']]
+        return
+
+class readVASP(Parsers):
+    
+    def __init__(self,filename=None, path=None, ret_min=False, read_many=False, **kwargs):
+        super().__init__(filename, **kwargs)
+        if read_many:
+            if path is None:
+                raise Exception('You need to provide path to read_many OUTCAR files')
+            outcar_files = Path(path).rglob('*OUTCAR*')
+            print(f'Found {len(outcar_files)} OUTCAR files')
+            path_file_tuples = [(str(file.parent), file.name) for file in outcar_files]
+            data = pd.DataFrame()
+            for j,(p,fn)  in enumerate(path_file_tuples):
+                df = self.read_OUTCAR(fn,p)
+                data = data.append(df, ignore_index = True)
+                if j%10 ==0: print(f'... read {j+1} files ...')
+        else:
+            if filename is None:
+                raise Exception('You need to provide filename if read_many = False')
+            data = self.read_OUTCAR(filename,path)
+        self.data = data
+        self.nameit()
+        self.natoms()
+        return 
+    
+    def read_OUTCAR(self,filename, path=None, ret_min=False):
+        if path is None:
+            fname = filename
+        else:
+            fname = f'{path}/{filename}'
+        
+        images = ase.io.read(fname, index=':')  # or read('vasprun.xml', index=':')
+        
+        at_type, coords, Forces, Energy = [ ], [], [], []
+        
+        for i, image in enumerate(images):
+        
+            at_type.append(image.get_chemical_symbols())
+            coords.append(image.get_positions())
+            Forces.append(image.get_forces()*23.06054194533) # to kcal/mol
+            Energy.append(image.get_potential_energy()*23.06054194533)  # to kcal/mol
+        
+        if ret_min:
+            am = np.array(Energy).argmin()
+            at_type, coords, Forces, Energy = [at_type[am] ], [coords[am] ], [Forces[am] ], [ Energy[am]]
+        
+        data = pd.DataFrame({'at_type':at_type, 'coords':coords,'Forces':Forces, 'Energy':Energy,
+                             'readfile':[fname]*len(Energy)})
+        return data
+    
+class npz_Parser(Parsers):
+    def __init__(self, filename, **kwargs):
+        super().__init__(filename,**kwargs)
+        self.dataraw = self._load_npz()
+
+    def _load_npz(self):
+        try:
+            with np.load(self.filename, allow_pickle=True) as npz_file:
+                return {key: npz_file[key] for key in npz_file.files}
+        except Exception as e:
+            print(f"Error loading .npz file: {e}")
+            return {}
+
+    def get_keys(self):
+        return list(self.data.keys())
+
+    def get_item(self, key):
+        return self.dataraw.get(key, None)
+
+class parse_MD17(npz_Parser):
+    def __init__(self, filename,**kwargs):
+        super().__init__(filename,**kwargs)
+        self.to_FFDtool()
+        self.to_pandas()
+        self.nameit()
+        self.natoms()
+        return 
+        
+        
+    def to_FFDtool(self):
+        atom_types = [mappers.nuclear_charge_to_symbol[x]  
+                      for x in self.dataraw.get('nuclear_charges') ]
+        self.atom_types = atom_types
+        
+        self.coords = self.dataraw.get('coords')
+        self.Forces = self.dataraw.get('forces')
+        self.total_energy = self.dataraw.get('energies')
+        return 
+    
+    def to_pandas(self):
+        data = pd.DataFrame()
+        data['coords'] = [x for x in self.coords]
+        data['Forces'] = [x for x in self.Forces]
+        data['at_type'] = [self.atom_types]*len(data['coords'])
+        data['Energy'] = self.total_energy
+        self.data = data
+        return 
+    
 class GeometryTransformations:
     """3D coordinate rotation utilities for molecular geometry manipulation."""
 
@@ -6092,6 +6214,19 @@ class FF_Optimizer(Optimizer):
                 fa = model_info.pa*fg[n].reshape( (nf,1) )
                 fc = model_info.pc*fg[n].reshape( (nf,1) )
                 FF_Optimizer.numba_add_angle(gradForces[n], fa, fc, i_index, j_index, k_index)
+        elif model_info.category =='DI':
+            k_index = model_info.k_indexes
+            l_index = model_info.l_indexes
+            for n in range(n_pars):
+                fg_resh = fg[n].reshape( (nf,1) )
+                fi = model_info.dri*fg_resh
+                fj = model_info.drj*fg_resh
+                fk = model_info.drk*fg_resh
+                fl = model_info.drl*fg_resh
+                FF_Optimizer.numba_add_dihedral(gradForces[n], fi, fj, fk, fl,
+                                        i_index, j_index, k_index, l_index)
+        
+ 
         return
     
     
@@ -6122,6 +6257,27 @@ class FF_Optimizer(Optimizer):
             fa = model_info.pa*dudx_vectorized
             fc = model_info.pc*dudx_vectorized
             FF_Optimizer.numba_add_angle(Forces, fa, fc, i_index, j_index, k_index)
+        elif model_info.category =='DI':
+            k_index = model_info.k_indexes
+            l_index = model_info.l_indexes
+            
+            fi = model_info.dri*dudx_vectorized
+            fj = model_info.drj*dudx_vectorized
+            fk = model_info.drk*dudx_vectorized
+            fl = model_info.drl*dudx_vectorized
+            FF_Optimizer.numba_add_dihedral(Forces, fi, fj, fk, fl,
+                                        i_index, j_index, k_index, l_index)
+        return
+    
+    #@jit(nopython=True,fastmath=True)
+    def numba_add_dihedral(forces,fi, fj, fk, fl , i_indices, j_indices, k_indices, l_indices):
+        for m in prange(len(i_indices)):
+            i, j, k, l = i_indices[m] , j_indices[m], k_indices[m], l_indices[m]
+            forces[i] += fi[m]
+            forces[j] += fj[m]
+            forces[k] += fk[m]
+            forces[l] += fl[m]
+        return
             
         return
     
@@ -6675,8 +6831,56 @@ class FF_Optimizer(Optimizer):
             model_attributes.update({'pa':np.array(pa),'pc':np.array(pc),
                                            'i_indexes':np.array(i_indexes),
                                            'j_indexes':np.array(j_indexes),
-                                           'k_indexes':np.array(k_indexes)
+                                           'k_indexes':np.array(k_indexes),
                                     })
+        
+        elif model.category == 'DI':
+            dri, drj, drk, drl = [] , [], [] , [] 
+            i_indexes, j_indexes , k_indexes, l_indexes = [], [], [], []
+            na = 0
+            
+            for m,(idx,val) in enumerate(values_dict.items()):
+                
+                if model.type  not in val[model.feature]:
+                    dri_ix = np.empty(0,dtype=float)
+                    drj_ix = np.empty(0,dtype=float)
+                    drk_ix = np.empty(0,dtype=float)
+                    drl_ix = np.empty(0,dtype=float)
+                    i_ix = np.empty(0,dtype=int)
+                    j_ix = np.empty(0,dtype=int)
+                    k_ix = np.empty(0,dtype=int)
+                    l_ix = np.empty(0,dtype=int)
+                else:
+                    dri_ix = val[model.feature][model.type]['dri']
+                    drj_ix = val[model.feature][model.type]['drj']
+                    drk_ix = val[model.feature][model.type]['drk']
+                    drl_ix = val[model.feature][model.type]['drl']
+                    i_ix = val[model.feature][model.type]['i_index']
+                    j_ix = val[model.feature][model.type]['j_index']
+                    k_ix = val[model.feature][model.type]['k_index']
+                    l_ix = val[model.feature][model.type]['l_index']
+            
+                dri.extend( dri_ix )
+                drj.extend( drj_ix )
+                drk.extend( drk_ix )
+                drl.extend( drl_ix )
+                
+                i_indexes.extend( i_ix + na )
+                j_indexes.extend( j_ix + na )
+                k_indexes.extend( k_ix + na )
+                l_indexes.extend( l_ix + na )
+                na += natoms_dict[ idx ]
+            
+            model_attributes.update({'dri':np.array(dri),
+                                     'drj':np.array(drj),
+                                     'drk':np.array(drk),
+                                     'drl':np.array(drl),
+                                    'i_indexes':np.array(i_indexes),
+                                    'j_indexes':np.array(j_indexes),
+                                    'k_indexes':np.array(k_indexes),
+                                    'l_indexes':np.array(l_indexes)
+                                    })
+
         return model_attributes
     
     def get_Energy(self,dataset):
