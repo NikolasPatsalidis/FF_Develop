@@ -4483,6 +4483,13 @@ class Setup_Interfacial_Optimization():
         'accept':-5.0,
         'visit':2.62,
         
+        'learning_rate':0.01,
+        'beta1':0.9,
+        'beta2':0.999,
+        'epsilon_adam':1e-8,
+        'batch_size':32,
+        'decay_rate':0.0,
+        
         'weighting_method':'constant',
         'w':1.0,
         'bT':15.0,
@@ -8183,6 +8190,260 @@ class FF_Optimizer(Optimizer):
                 print('STOCHASTIC SLSQP FINISHED')
                 sys.stdout.flush()
                 return 
+            
+            elif opt_method == 'GD':
+                # Gradient Descent
+                print('Gradient Descent Began')
+                sys.stdout.flush()
+                tmethod = perf_counter()
+                
+                lr = self.setup.learning_rate
+                decay_rate = self.setup.decay_rate
+                
+                best_cost = 1e16
+                best_params = params.copy()
+                cost_history = []
+                
+                for iteration in range(maxiter):
+                    # Compute gradient
+                    grad = self.gradCost(params, *args)
+                    
+                    # Learning rate decay
+                    lr_t = lr / (1.0 + decay_rate * iteration)
+                    
+                    # Update parameters
+                    params = params - lr_t * grad
+                    
+                    # Clip to bounds
+                    for i, (lb, ub) in enumerate(bounds):
+                        params[i] = np.clip(params[i], lb, ub)
+                    
+                    # Compute cost
+                    cost = self.CostFunction(params, *args)
+                    cost_history.append(cost)
+                    
+                    if cost < best_cost:
+                        best_cost = cost
+                        best_params = params.copy()
+                    
+                    if iteration % 10 == 0:
+                        print(f'GD Iteration {iteration}, Cost = {cost:.6e}, LR = {lr_t:.4e}')
+                        sys.stdout.flush()
+                    
+                    # Convergence check
+                    if len(cost_history) > 1 and abs(cost_history[-1] - cost_history[-2]) < tol:
+                        print(f'GD Converged at iteration {iteration}')
+                        break
+                
+                # Create result object similar to scipy
+                class OptResult:
+                    def __init__(self, x, fun, nfev):
+                        self.x = x
+                        self.fun = fun
+                        self.nfev = nfev
+                        self.success = True
+                
+                res = OptResult(best_params, best_cost, iteration + 1)
+                print(f'GD Finished: Best Cost = {best_cost:.6e}, Time = {perf_counter()-tmethod:.3e} sec')
+                sys.stdout.flush()
+            
+            elif opt_method == 'SGD':
+                # Stochastic Gradient Descent
+                print('Stochastic Gradient Descent Began')
+                sys.stdout.flush()
+                tmethod = perf_counter()
+                
+                lr = self.setup.learning_rate
+                decay_rate = self.setup.decay_rate
+                batch_size = self.setup.batch_size
+                
+                best_cost = 1e16
+                best_params = params.copy()
+                total_train_indexes = self.train_indexes.copy()
+                n_total = len(total_train_indexes)
+                
+                # Pre-compute batch args for all batches (vectorization done once)
+                print('SGD: Pre-computing batch arguments...')
+                sys.stdout.flush()
+                batch_args_dict = {}
+                for batch_idx, batch_start in enumerate(range(0, n_total, batch_size)):
+                    batch_end = min(batch_start + batch_size, n_total)
+                    self.train_indexes = total_train_indexes[batch_start:batch_end]
+                    
+                    _, _, batch_args, _, _ = self.get_params_n_args('init', 'train')
+                    if normalize_data:
+                        mu_e, std_e, mu_f, std_f = self.get_normalized_data('train')
+                        batch_args = (*batch_args, mu_e, std_e, mu_f, std_f)
+                    batch_args_dict[batch_idx] = batch_args
+                
+                # Pre-compute full training set args
+                self.train_indexes = total_train_indexes
+                _, _, full_args, _, _ = self.get_params_n_args('init', 'train')
+                if normalize_data:
+                    mu_e, std_e, mu_f, std_f = self.get_normalized_data('train')
+                    full_args = (*full_args, mu_e, std_e, mu_f, std_f)
+                
+                n_batches = len(batch_args_dict)
+                print(f'SGD: Pre-computed {n_batches} batches, starting optimization...')
+                sys.stdout.flush()
+                
+                epoch = 0
+                total_iterations = 0
+                
+                while epoch < maxiter:
+                    # Shuffle batch order at each epoch
+                    batch_order = np.random.permutation(n_batches)
+                    
+                    for batch_idx in batch_order:
+                        batch_args = batch_args_dict[batch_idx]
+                        
+                        # Compute gradient on batch
+                        grad = self.gradCost(params, *batch_args)
+                        
+                        # Learning rate decay
+                        lr_t = lr / (1.0 + decay_rate * total_iterations)
+                        
+                        # Update parameters
+                        params = params - lr_t * grad
+                        
+                        # Clip to bounds
+                        for i, (lb, ub) in enumerate(bounds):
+                            params[i] = np.clip(params[i], lb, ub)
+                        
+                        total_iterations += 1
+                    
+                    # Evaluate on full training set at end of epoch
+                    cost = self.CostFunction(params, *full_args)
+                    
+                    if cost < best_cost:
+                        best_cost = cost
+                        best_params = params.copy()
+                    
+                    if epoch % 10 == 0:
+                        print(f'SGD Epoch {epoch}, Cost = {cost:.6e}, LR = {lr_t:.4e}')
+                        sys.stdout.flush()
+                    
+                    epoch += 1
+                
+                self.train_indexes = total_train_indexes
+                
+                class OptResult:
+                    def __init__(self, x, fun, nfev):
+                        self.x = x
+                        self.fun = fun
+                        self.nfev = nfev
+                        self.success = True
+                
+                res = OptResult(best_params, best_cost, total_iterations)
+                print(f'SGD Finished: Best Cost = {best_cost:.6e}, Time = {perf_counter()-tmethod:.3e} sec')
+                sys.stdout.flush()
+            
+            elif opt_method == 'Adam':
+                # Adam optimizer
+                print('Adam Optimizer Began')
+                sys.stdout.flush()
+                tmethod = perf_counter()
+                
+                lr = self.setup.learning_rate
+                beta1 = self.setup.beta1
+                beta2 = self.setup.beta2
+                epsilon = self.setup.epsilon_adam
+                batch_size = self.setup.batch_size
+                
+                # Initialize moment estimates
+                m = np.zeros_like(params)
+                v = np.zeros_like(params)
+                
+                best_cost = 1e16
+                best_params = params.copy()
+                total_train_indexes = self.train_indexes.copy()
+                n_total = len(total_train_indexes)
+                
+                # Pre-compute batch args for all batches (vectorization done once)
+                print('Adam: Pre-computing batch arguments...')
+                sys.stdout.flush()
+                batch_args_dict = {}
+                for batch_idx, batch_start in enumerate(range(0, n_total, batch_size)):
+                    batch_end = min(batch_start + batch_size, n_total)
+                    self.train_indexes = total_train_indexes[batch_start:batch_end]
+                    
+                    _, _, batch_args, _, _ = self.get_params_n_args('init', 'train')
+                    if normalize_data:
+                        mu_e, std_e, mu_f, std_f = self.get_normalized_data('train')
+                        batch_args = (*batch_args, mu_e, std_e, mu_f, std_f)
+                    batch_args_dict[batch_idx] = batch_args
+                
+                # Pre-compute full training set args
+                self.train_indexes = total_train_indexes
+                _, _, full_args, _, _ = self.get_params_n_args('init', 'train')
+                if normalize_data:
+                    mu_e, std_e, mu_f, std_f = self.get_normalized_data('train')
+                    full_args = (*full_args, mu_e, std_e, mu_f, std_f)
+                
+                n_batches = len(batch_args_dict)
+                print(f'Adam: Pre-computed {n_batches} batches, starting optimization...')
+                sys.stdout.flush()
+                
+                t = 0  # timestep
+                epoch = 0
+                
+                while epoch < maxiter:
+                    # Shuffle batch order at each epoch
+                    batch_order = np.random.permutation(n_batches)
+                    
+                    for batch_idx in batch_order:
+                        batch_args = batch_args_dict[batch_idx]
+                        
+                        t += 1
+                        
+                        # Compute gradient on batch
+                        grad = self.gradCost(params, *batch_args)
+                        
+                        # Update biased first moment estimate
+                        m = beta1 * m + (1 - beta1) * grad
+                        
+                        # Update biased second raw moment estimate
+                        v = beta2 * v + (1 - beta2) * (grad ** 2)
+                        
+                        # Compute bias-corrected first moment estimate
+                        m_hat = m / (1 - beta1 ** t)
+                        
+                        # Compute bias-corrected second raw moment estimate
+                        v_hat = v / (1 - beta2 ** t)
+                        
+                        # Update parameters
+                        params = params - lr * m_hat / (np.sqrt(v_hat) + epsilon)
+                        
+                        # Clip to bounds
+                        for i, (lb, ub) in enumerate(bounds):
+                            params[i] = np.clip(params[i], lb, ub)
+                    
+                    # Evaluate on full training set at end of epoch
+                    cost = self.CostFunction(params, *full_args)
+                    
+                    if cost < best_cost:
+                        best_cost = cost
+                        best_params = params.copy()
+                    
+                    if epoch % 10 == 0:
+                        print(f'Adam Epoch {epoch}, Cost = {cost:.6e}')
+                        sys.stdout.flush()
+                    
+                    epoch += 1
+                
+                self.train_indexes = total_train_indexes
+                
+                class OptResult:
+                    def __init__(self, x, fun, nfev):
+                        self.x = x
+                        self.fun = fun
+                        self.nfev = nfev
+                        self.success = True
+                
+                res = OptResult(best_params, best_cost, t)
+                print(f'Adam Finished: Best Cost = {best_cost:.6e}, Time = {perf_counter()-tmethod:.3e} sec')
+                sys.stdout.flush()
+            
             else:
                 s = 'Error: wrong optimization_method name'
                 logger.error(s)
