@@ -1088,7 +1088,7 @@ class al_help():
                                         find_angles=True,
                                         find_dihedrals=True,
                                         find_densities=True,
-                                        vdw_bond_dist=0,
+                                        vdw_bond_dist=3,
                                         rho_r0=setup.rho_r0,rho_rc=setup.rho_rc)
         
         intersHandler.InteractionsForData(setup)
@@ -1633,14 +1633,11 @@ class al_help():
         dataeval.plot_predict_vs_target(E, U, path = setup.runpath,title='prediction dataset',
                                           fname='predict.png',size=2.35,compare='sys_name')
         
-        forces_true = [] ; forces_class = []
-        for ftrue, fclass in zip(data['Forces'].values, data['Fclass'].values):
-            for ft,fc in zip(ftrue,fclass):
-                for x,y in zip(ft,fc):
-                    forces_true.append(x)
-                    forces_class.append(y)
-        
-        dataeval.plot_predict_vs_target(np.array(forces_true),np.array(forces_class),
+        forces_true, forces_class, forces_filter = optimizer.get_Forces_and_ForceClass('all')
+        forces_true = forces_true[forces_filter].flatten()
+        forces_class = forces_class[forces_filter].flatten()
+
+        dataeval.plot_predict_vs_target(forces_true, forces_class,
                                         path = setup.runpath,title='Prediction dataset Forces',
                                           fname='predictForces.png',size=2.35,
                                           xlabel=r'$F^{dft}$ (kcal/mol/$\AA$)',ylabel=r'$F^{class}$ (kcal/mol/$\AA$)')
@@ -1698,6 +1695,7 @@ class al_help():
             df = Data_Manager.read_xyz('{:s}/{:s}'.format(path,fname))
             data = data.append(df,ignore_index=True) 
         return data
+    
 
     @staticmethod
     def solve_model(data,setup):
@@ -1736,7 +1734,7 @@ class al_help():
         
         min_per_system = np.min( [ np.count_nonzero( data['sys_name'] == name ) for name in np.unique(data['sys_name']) ] )
         ndata = len(data)
-        if ndata < 100 or min_per_system < 10:
+        if ndata < 10 or min_per_system < 10:
             method = 'scan_lambda_force'
             print(f'Setting method to scan_lambda_force: ndata = {ndata}, min_per_system = {min_per_system}')
         if not setup.optimize:
@@ -1779,14 +1777,11 @@ class al_help():
         train_eval.plot_predict_vs_target(E,U, path = setup.runpath,title='train dataset',
                                           fname='train.png',size=2.35,compare='sys_name')
         
-        forces_true = [] ; forces_class = []
-        for ftrue, fclass in zip(dtrain['Forces'].values, dtrain['Fclass'].values):
-            for ft,fc in zip(ftrue,fclass):
-                for x,y in zip(ft,fc):
-                    forces_true.append(x)
-                    forces_class.append(y)
-        
-        train_eval.plot_predict_vs_target(np.array(forces_true),np.array(forces_class),
+        forces_true, forces_class, forces_filter = optimizer.get_Forces_and_ForceClass('train')
+        forces_true = forces_true[forces_filter]
+        forces_class = forces_class[forces_filter]
+
+        train_eval.plot_predict_vs_target(forces_true,forces_class,
                                         path = setup.runpath,title='Training dataset Forces',
                                           fname='trainingForce.png',size=2.35,
                                           xlabel=r'$F^{dft}$ (kcal/mol/$\AA$)',ylabel=r'$F^{class}$ (kcal/mol/$\AA$)')
@@ -1798,14 +1793,11 @@ class al_help():
         dev_eval.plot_predict_vs_target(Edev,Udev,path = setup.runpath,title='development dataset',
                                           fname='development.png',size=2.35,compare='sys_name')
         
-        forces_true = [] ; forces_class = []
-        for ftrue, fclass in zip(ddev['Forces'].values, ddev['Fclass'].values):
-            for ft,fc in zip(ftrue,fclass):
-                for x,y in zip(ft,fc):
-                    forces_true.append(x)
-                    forces_class.append(y)
+        forces_true, forces_class, forces_filter = optimizer.get_Forces_and_ForceClass('dev')
+        forces_true = forces_true[forces_filter]
+        forces_class = forces_class[forces_filter]
                     
-        dev_eval.plot_predict_vs_target(np.array(forces_true),np.array(forces_class),
+        dev_eval.plot_predict_vs_target(forces_true,forces_class,
                                         path = setup.runpath,title='development dataset Forces',
                                           fname='developmentForce.png',size=2.35,
                                           xlabel=r'$F^{dft}$ (kcal/mol/$\AA$)',ylabel=r'$F^{class}$ (kcal/mol/$\AA$)')
@@ -1821,7 +1813,7 @@ class al_help():
                 continue
             else:
                 fe_ty.append(c)
-                dataMan.plot_discriptor_distribution(ty,fe)
+                #dataMan.plot_discriptor_distribution(ty,fe)
 
         dataMan.save_selected_data(setup.runpath+'/frames.xyz', data,labels=['sys_name','Energy'])
         
@@ -1829,7 +1821,7 @@ class al_help():
         
         tf =perf_counter() - t0
         print('Time consumed for solving the model --> {:4.3e} min'.format(tf/60))
-        return  data, optimizer.current_costs , optimizer.setup, optimizer
+        return  data,  optimizer
 
     @staticmethod
     def make_random_petrubations(data,nper=10,sigma=0.05):
@@ -2820,6 +2812,82 @@ class GeneralFunctions:
 class VectorGeometry:
     """Numba-accelerated vector geometry utilities for molecular calculations."""
     
+    @staticmethod
+    @njit
+    def apply_mic(r_vec, lattice, inv_lattice):
+        """Apply minimum image convention for periodic boundary conditions.
+        
+        Based on Tuckerman, Statistical Mechanics, Appendix B, Eq B.9.
+        
+        Parameters
+        ----------
+        r_vec : numpy.ndarray
+            Displacement vector (3,) in Cartesian coordinates.
+        lattice : numpy.ndarray
+            Lattice vectors as rows (3,3). lattice[i] is the i-th lattice vector.
+        inv_lattice : numpy.ndarray
+            Inverse of the lattice matrix (3,3), i.e., np.linalg.inv(lattice).
+        
+        Returns
+        -------
+        numpy.ndarray
+            Displacement vector after applying minimum image convention.
+        """
+        # Convert to fractional coordinates
+        s = np.dot(r_vec, inv_lattice)
+        # Wrap to [-0.5, 0.5) using floor(x + 0.5) for numba compatibility
+        s = s - np.floor(s + 0.5)
+        # Convert back to Cartesian
+        r_mic = np.dot(s, lattice)
+        return r_mic
+    
+    @staticmethod
+    #@njit
+    def calc_dist_mic(r1, r2, lattice, inv_lattice):
+        """Compute distance with minimum image convention for periodic systems.
+        
+        Parameters
+        ----------
+        r1, r2 : numpy.ndarray
+            Position vectors (3,).
+        lattice : numpy.ndarray
+            Lattice vectors as rows (3,3).
+        inv_lattice : numpy.ndarray
+            Inverse of the lattice matrix (3,3).
+        
+        Returns
+        -------
+        float
+            Minimum image distance.
+        """
+        r = r1 - r2
+        r_mic = VectorGeometry.apply_mic(r, lattice, inv_lattice)
+        return np.sqrt(np.dot(r_mic, r_mic))
+    
+    @staticmethod
+    #@njit
+    def calc_unitvec_mic(r1, r2, lattice, inv_lattice):
+        """Compute unit vector with minimum image convention.
+        
+        Parameters
+        ----------
+        r1, r2 : numpy.ndarray
+            Position vectors (3,).
+        lattice : numpy.ndarray
+            Lattice vectors as rows (3,3).
+        inv_lattice : numpy.ndarray
+            Inverse of the lattice matrix (3,3).
+        
+        Returns
+        -------
+        numpy.ndarray
+            Unit vector from r2 to r1 under MIC.
+        """
+        r = r1 - r2
+        r_mic = VectorGeometry.apply_mic(r, lattice, inv_lattice)
+        d = np.sqrt(np.dot(r_mic, r_mic))
+        return r_mic / d
+    
     @jit(nopython=True,fastmath=True)
     def calc_dist(r1,r2):
         """Compute Euclidean distance between two 3D points."""
@@ -2856,6 +2924,44 @@ class VectorGeometry:
         fk *= dth_dcth
         return fi, fk
     
+    @staticmethod
+    #@njit
+    def calc_angle_pa_pc_mic(ri, rj, rk, lattice, inv_lattice):
+        """Compute angle i-j-k and partial derivatives with minimum image convention.
+        
+        Parameters
+        ----------
+        ri, rj, rk : numpy.ndarray
+            Position vectors (3,) for atoms i, j, k.
+        lattice : numpy.ndarray
+            Lattice vectors as rows (3,3).
+        inv_lattice : numpy.ndarray
+            Inverse of the lattice matrix (3,3).
+        
+        Returns
+        -------
+        tuple
+            (fi, fk) partial derivatives w.r.t. positions i and k.
+        """
+        vij = ri - rj
+        vkj = rk - rj
+        # Apply MIC to bond vectors
+        vij = VectorGeometry.apply_mic(vij, lattice, inv_lattice)
+        vkj = VectorGeometry.apply_mic(vkj, lattice, inv_lattice)
+        
+        a = np.dot(vij, vkj)
+        b = np.sqrt(np.dot(vij, vij))
+        c = np.sqrt(np.dot(vkj, vkj))
+        
+        fi = vkj / (b * c) - a * vij / (c * b**3)
+        fk = vij / (b * c) - a * vkj / (b * c**3)
+        
+        cth = a / (b * c)
+        dth_dcth = -1 / max(np.sin(np.arccos(cth)), 1.49e-8)
+        
+        fi *= dth_dcth
+        fk *= dth_dcth
+        return fi, fk
 
     @jit(nopython=True,fastmath=True)
     def calc_angle(r1,r2,r3):
@@ -2864,6 +2970,36 @@ class VectorGeometry:
         nd1 = np.sqrt(np.dot(d1,d1))
         nd2 = np.sqrt(np.dot(d2,d2))
         cos_th = np.dot(d1,d2)/(nd1*nd2)
+        return np.arccos(cos_th)
+    
+    @staticmethod
+    #@njit
+    def calc_angle_mic(r1, r2, r3, lattice, inv_lattice):
+        """Compute angle 1-2-3 in radians with minimum image convention.
+        
+        Parameters
+        ----------
+        r1, r2, r3 : numpy.ndarray
+            Position vectors (3,) for atoms 1, 2, 3.
+        lattice : numpy.ndarray
+            Lattice vectors as rows (3,3).
+        inv_lattice : numpy.ndarray
+            Inverse of the lattice matrix (3,3).
+        
+        Returns
+        -------
+        float
+            Angle in radians.
+        """
+        d1 = r1 - r2
+        d2 = r3 - r2
+        # Apply MIC to bond vectors
+        d1 = VectorGeometry.apply_mic(d1, lattice, inv_lattice)
+        d2 = VectorGeometry.apply_mic(d2, lattice, inv_lattice)
+        
+        nd1 = np.sqrt(np.dot(d1, d1))
+        nd2 = np.sqrt(np.dot(d2, d2))
+        cos_th = np.dot(d1, d2) / (nd1 * nd2)
         return np.arccos(cos_th)
     
     @njit
@@ -2898,6 +3034,43 @@ class VectorGeometry:
         b1 = p1 - p0
         b2 = p2 - p1
         b3 = p3 - p2
+    
+        n1 = np.cross(b1, b2)
+        n2 = np.cross(b2, b3)
+    
+        m1 = np.cross(n1, b2 / np.linalg.norm(b2))
+    
+        x = np.dot(n1, n2)
+        y = np.dot(m1, n2)
+    
+        return np.arctan2(y, x)
+    
+    @staticmethod
+    #@njit
+    def calc_dihedral_mic(p0, p1, p2, p3, lattice, inv_lattice):
+        """Compute dihedral angle between four points with minimum image convention.
+        
+        Parameters
+        ----------
+        p0, p1, p2, p3 : numpy.ndarray
+            Position vectors (3,) for atoms 0, 1, 2, 3.
+        lattice : numpy.ndarray
+            Lattice vectors as rows (3,3).
+        inv_lattice : numpy.ndarray
+            Inverse of the lattice matrix (3,3).
+        
+        Returns
+        -------
+        float
+            Dihedral angle in radians.
+        """
+        b1 = p1 - p0
+        b2 = p2 - p1
+        b3 = p3 - p2
+        # Apply MIC to bond vectors
+        b1 = VectorGeometry.apply_mic(b1, lattice, inv_lattice)
+        b2 = VectorGeometry.apply_mic(b2, lattice, inv_lattice)
+        b3 = VectorGeometry.apply_mic(b3, lattice, inv_lattice)
     
         n1 = np.cross(b1, b2)
         n2 = np.cross(b2, b3)
@@ -2959,6 +3132,100 @@ class VectorGeometry:
         
         # dwdrj calculation
         
+        db1drj = 1
+        db2drj = -1
+        
+        T1 = dwdb1*db1drj
+        
+        dn1db2 = VectorGeometry.derivative_cross_product_wrt_second(b1, b2) 
+        T21 = np.dot(dwdn1, dn1db2)
+        
+        dn2db2 = VectorGeometry.derivative_cross_product_wrt_first(b2, b3)
+        dxdn2= n1
+        dydn2 = m1
+        dwdn2 = (dwdx*dxdn2 + dwdy*dydn2).T
+        T22 = np.dot(dwdn2, dn2db2)
+        
+        dnb2db2 = VectorGeometry.derivative_normalized_vector(b2)
+        dm1dnb2 = VectorGeometry.derivative_cross_product_wrt_second(n1, nb2)
+        
+        dwdnb2 = np.dot(dwdm1,dm1dnb2).T     
+        T23 = np.dot(dwdnb2,dnb2db2)
+        
+        dwdb2 = T21 + T22 + T23
+        
+        grad[1] = T1 + dwdb2*db2drj
+        
+        #dwdrk calculation
+        db2drk = 1 
+        db3drk = -1 
+        
+        dwdb3 = VectorGeometry.derivative_cross_product_wrt_second(b2, b3)
+        dwdb3 = np.dot(dwdn2,dwdb3)
+        A1 = dwdb2*db2drk 
+        A2 = dwdb3*db3drk
+        grad[2] = A1 + A2 
+        
+        #dwdrl caclulation
+        db3drl = 1
+        grad[3] = dwdb3*db3drl
+        
+        return grad
+    
+    @staticmethod
+    def calc_dihedral_grad_mic(ri, rj, rk, rl, lattice, inv_lattice):
+        """Compute gradient of dihedral angle with minimum image convention.
+        
+        Parameters
+        ----------
+        ri, rj, rk, rl : numpy.ndarray
+            Position vectors (3,) for atoms i, j, k, l.
+        lattice : numpy.ndarray
+            Lattice vectors as rows (3,3).
+        inv_lattice : numpy.ndarray
+            Inverse of the lattice matrix (3,3).
+        
+        Returns
+        -------
+        numpy.ndarray
+            4x3 array of gradients for atoms i, j, k, l.
+        """
+        # Compute bond vectors with MIC
+        b1 = rj - ri
+        b2 = rk - rj
+        b3 = rl - rk
+        b1 = VectorGeometry.apply_mic(b1, lattice, inv_lattice)
+        b2 = VectorGeometry.apply_mic(b2, lattice, inv_lattice)
+        b3 = VectorGeometry.apply_mic(b3, lattice, inv_lattice)
+        
+        n1 = np.cross(b1, b2)
+        n2 = np.cross(b2, b3)
+        nb2 = VectorGeometry.normalize(b2)
+        m1 = np.cross(n1, nb2)
+    
+        x = np.dot(n1, n2)
+        y = np.dot(m1, n2)
+        
+        grad = np.zeros((4,3),dtype=np.float64)
+        
+        dwdx = -y/(x**2+y**2)
+        dwdy = x/(x**2+y**2)
+        
+        # dwdri calculation
+        dxdn1= n2
+        dydm1 = n2
+        
+        dm1dn1 = VectorGeometry.derivative_cross_product_wrt_first(n1, nb2)
+        
+        dn1db1 = VectorGeometry.derivative_cross_product_wrt_first(b1, b2)
+        dwdm1 = dwdy*dydm1.T
+        db1dri = -1
+        dwdn1 = dwdx*dxdn1.T + np.dot(dwdm1,dm1dn1).T 
+        
+        dwdb1 = np.dot(dwdn1,dn1db1)
+        grad[0] = dwdb1*db1dri
+        
+        # dwdrj calculation
         db1drj = 1
         db2drj = -1
         
@@ -3292,7 +3559,7 @@ class MorseBond:
         
         t1 = - alpha*(r-re)
         e1 = np.exp(t1)
-        g = 2 * alpha* De *(1-e1)*e1
+        g = 2 * alpha * De *(1-e1)*e1
         self.dydx = g
         return g
        
@@ -3401,7 +3668,7 @@ class expCos:
         fg[2] =  dydx *(1/lam - cos_diff * cos_diff)
         self.derivative_gradient = fg
         return fg     
- 
+
 
 class Fourier:
     """Fourier series dihedral potential: U = sum_j(a_j*(1 + cos(j*r)/j))."""
@@ -3411,16 +3678,29 @@ class Fourier:
         self.params = params
         return 
     def u_vectorized(self):
-        """Compute potential energy for all angles."""
+        """Compute potential energy for all angles, shifted so min(U) = 0."""
         x = self.params
         r = self.r
         
         n = x.shape[0]
         u = np.zeros(r.shape)
         for j in range(1,n+1):
-            u += x[j-1] * (1 + (j**(-1)) * np.cos(j*r) )
+            u += x[j-1] * (j**(-1) * np.cos(j*r))
         
-        return u
+        # Shift so minimum is 0: U_shifted = U - U_min
+        ua_min, _ = self.get_min()
+        
+        return u - ua_min
+
+    def get_min(self):
+        x = self.params
+        n = x.shape[0]
+        ra = np.arange(0, np.pi,0.01)
+        ua = np.zeros_like(ra)
+        for j in range(1, n+1):
+            ua += x[j-1] * (j**(-1) * np.cos(j*ra))
+        ra_min = ra [np.argmin(ua)]
+        return ua.min(), ra_min
     
     def find_dydx(self):
         """Compute derivative of potential w.r.t. angle."""
@@ -3438,11 +3718,12 @@ class Fourier:
         """Compute gradient of potential w.r.t. parameters."""
         r = self.r
         x = self.params
+        _ , ra_min = self.get_min()
         nr = r.shape[0]
         n = x.shape[0]
         g = np.zeros((n,nr))
         for j in range(1,n+1):
-            g[j-1] = 1 + (j**(-1)) * np.cos(j*r)
+            g[j-1] =  (j**(-1)) * np.cos(j*r) - (j**(-1)) * np.cos(j*ra_min)
         self.params_gradient = g
         return g
     
@@ -3540,12 +3821,13 @@ class BezierPeriodic(MathAssist):
     """Periodic Bezier curve potential for angular interactions.
 
     Uses Bezier control points with periodic boundary conditions
-    to define a smooth potential energy surface.
+    to define a smooth potential energy surface. 
+    Valid for values from 0 to pi 
     """
     def __init__(self,xvals, params,  M = None ):
         """Initialize with angle values and control point parameters."""
         
-        self.xvals = xvals
+        self.xvals = xvals 
         self.params = params
         self.y0 = params[0]
         self.yN = params[0]
@@ -3562,7 +3844,7 @@ class BezierPeriodic(MathAssist):
         
         self.ycontrol = y
         self.npoints = y.shape[0]
-        self.L =np.pi
+        self.L = np.pi
         dx = self.L / float(self.npoints-1)
         
         x = np.empty_like(y)
@@ -3597,9 +3879,9 @@ class BezierPeriodic(MathAssist):
         return M
     
     def find_taus(self):
-        """Compute normalized parameter values tau = x/L with periodic wrapping."""
+        """Compute normalized parameter values tau = |x|/L for symmetric potential around 0."""
         L = self.L
-        self.taus = (np.abs(self.xvals) % L) /L
+        self.taus = np.abs(self.xvals) / L
         
     def u_vectorized(self):
         """Compute potential energy for all angles."""
@@ -3646,7 +3928,8 @@ class BezierPeriodic(MathAssist):
         g0_1 = np.dot(taus_power[0:-1].T,coeff_tj[1:])   
         
         self.dydt = g0_1
-        self.dydx = g0_1/self.L # dydt*dtdx
+        # For symmetric potential: tau = |x|/L, so dtau/dx = sign(x)/L
+        self.dydx = g0_1/self.L * np.sign(self.xvals)
         
         return self.dydx
     
@@ -3708,12 +3991,14 @@ class BezierPeriodic(MathAssist):
         fg = np.zeros((self.params.shape[0],nt))
         L = self.L
         
+        # For symmetric potential: tau = |x|/L, so dtau/dx = sign(x)/L
+        sign_x = np.sign(self.xvals)
         
-        fg[0] = (dC[0] + dC[-1]  + dC[1] + dC[2] + dC[-2] + dC[-3])/L 
+        fg[0] = (dC[0] + dC[-1]  + dC[1] + dC[2] + dC[-2] + dC[-3])/L * sign_x
         
-        fg[1] = (dC[1] - dC[-2])/L
-        fg[2] = (dC[2] - dC[-3])/L
-        fg[3:] = dC[3:-3]/L 
+        fg[1] = (dC[1] - dC[-2])/L * sign_x
+        fg[2] = (dC[2] - dC[-3])/L * sign_x
+        fg[3:] = dC[3:-3]/L * sign_x
         
         self.params_gradient = fg
         
@@ -4162,10 +4447,10 @@ class TestPotentials:
             plt.legend(fontsize=6,frameon=False)
             plt.close()
         if diff_max > tol*dv:
-            print("max difference {:4.3e}".format(diff_max))
+            print("max difference {:4.3e}, mean_diff = {:4.3e}".format(diff_max,diff.mean()))
             print('Derivative Test not passed')
             return
-        print("Derivative check ok, max difference {:4.3e}".format(diff_max))
+        print("max difference {:4.3e}\n --> Derivative check ok".format(diff_max))
         return
     
     def time_cost(self, Nt=100,verbose=True):
@@ -4308,7 +4593,7 @@ class TestPotentials:
                 print('Derivative Gradient Test not passed')
                 passed = False
         if passed:
-            print('Derivative Gradient check ok!')
+            print('-->Derivative Gradient check ok!')
         return
     
     
@@ -4356,7 +4641,7 @@ class TestPotentials:
                 passed =False
                 print('Gradient Test not passed')
         if passed:
-            print('Gradient check ok!')
+            print('-->Gradient check ok!')
         return
 
     @staticmethod
@@ -4487,7 +4772,7 @@ class Setup_Interfacial_Optimization():
         'beta1':0.9,
         'beta2':0.999,
         'epsilon_adam':1e-8,
-        'batch_size':32,
+        'batch_size':64,
         'decay_rate':0.0,
         
         'weighting_method':'constant',
@@ -4510,11 +4795,12 @@ class Setup_Interfacial_Optimization():
         'perturbation_method':'atoms',
         'lammps_potential_extra_lines':"['']",
         'rigid_style':'single', 
-        'extra_pair_coeff':"{('DUMP','DUMP'):['morse','value','value','value']}"
+        'extra_pair_coeff':"{('DUMP','DUMP'):['morse','value','value','value']}",
+        'not_optimize_force_for':"[]"
         }
 
     executes = ['distance_map','reference_energy','struct_types','rigid_types',
-            'lammps_potential_extra_lines','extra_pair_coeff']
+            'lammps_potential_extra_lines','extra_pair_coeff','not_optimize_force_for']
     
     def __init__(self,fname):
         '''
@@ -4716,6 +5002,98 @@ class Setup_Interfacial_Optimization():
         plt.show()
         plt.close()
 
+    def test_current_potentials(self, which='init', plot=False, verbose=True):
+        """Test all potential functions using numerical derivative verification.
+        
+        Parameters
+        ----------
+        which : str
+            Which model set to test ('init' or 'opt').
+        plot : bool
+            Whether to generate comparison plots.
+        verbose : bool
+            Whether to print detailed output.
+        
+        Output is written to '{which}_potential_test.out'.
+        """
+        import contextlib
+        
+        models = getattr(self, which + '_models')
+        output_file = f'{which}_potential_test.out'
+        
+        with open(output_file, 'w') as f:
+            with contextlib.redirect_stdout(f):
+                print("\n" + "="*60)
+                print(f"Testing all potential functions ({which}_models)")
+                print("="*60 + "\n")
+                
+                for model_name, model in models.items():
+                    # Skip excess models
+                    if self.excess_model(model.category, model.num):
+                        continue
+                        
+                    print(f"\n{'='*60}")
+                    print(f"Testing model: {model_name}")
+                    print(f"Function: {model.model}")
+                    print(f"Category: {model.category}")
+                    print(f"Type: {model.type}")
+                    print(f"Parameters: {model.parameters}")
+                    print("="*60)
+                    
+                    # Determine appropriate value range based on category
+                    if model.category == 'PW':  # Pair-wise (vdW)
+                        min_value = 1.6
+                        max_value = 8.0
+                    elif model.category == 'BO':  # Bond
+                        min_value = 0.85
+                        max_value = 3.5
+                    elif model.category == 'AN':  # Angle
+                        min_value = 0.5
+                        max_value = np.pi - 0.1
+                    elif model.category == 'DI':  # Dihedral
+                        min_value = -np.pi + 0.001
+                        max_value = np.pi - 0.001
+                    elif model.category == 'LD':  # Local density
+                        min_value = 0.01
+                        max_value = model.parameters[0] +0.02
+                    else:
+                        min_value = 0.1
+                        max_value = 5.0
+                    
+                    try:
+                        # Create TestPotentials instance
+                        tester = TestPotentials(
+                            function_name=model.model,
+                            params=model.parameters,
+                            min_value=min_value,
+                            max_value=max_value,
+                            dv=0.001,
+                            fargs=model.model_args,
+                            plot=plot,
+                            ignore_high_u=1e16
+                        )
+                        
+                        # Run derivative check (dU/dr)
+                        print("\n--- Derivative Check (dU/dr) ---")
+                        tester.derivative_check(tol=1, plot=plot, verbose=verbose)
+                        
+                        # Run gradient check (dU/dparam)
+                        print("\n--- Gradient Check (dU/dparam) ---")
+                        tester.gradient_check(epsilon=1e-4, tol=1, plot=plot, verbose=verbose)
+                        
+                        # Run derivative gradient check (d²U/dr/dparam)
+                        print("\n--- Derivative Gradient Check (d²U/dr/dparam) ---")
+                        tester.derivative_gradient_check(epsilon=1e-4, tol=1, plot=plot, verbose=verbose)
+                        
+                    except Exception as e:
+                        print(f"Error testing {model_name}: {e}")
+                
+                print("\n" + "="*60)
+                print("All potential tests completed")
+                print("="*60)
+        
+        print(f"Test results written to: {output_file}")
+        return
 
     class model_interaction():
         """Container for a single interaction model (pair, bond, angle, dihedral, or LD)."""
@@ -4889,7 +5267,7 @@ class Setup_Interfacial_Optimization():
                 file.write('&{:s}\n'.format(k))
                 file.write('FUNC {:s}\n'.format(model.model))
                 for k,p in model.pinfo.items():
-                    file.write('{:10s} : {:8.8f}  {:d}  {:8.8f}  {:8.8f}    {:8.8f} \n'.format(
+                    file.write('{:10s} : {:14.13f}  {:d}  {:6.5f}  {:6.5f}    {:6.5f} \n'.format(
                                     p.name, p.value, int(p.opt),p.low_bound, p.upper_bound,p.regul))
                 
                 file.write('/\n\n')
@@ -5716,95 +6094,13 @@ class Interactions():
         self.data['neibs'] = all_neibs       
         return
     
-    def calc_interaction_values(self):
-        """Compute descriptor values (distances, angles, dihedrals, rhos) for all configurations."""
-        n = len(self.data)
-        
-        all_Values = np.empty(n ,dtype=object)
-        
-        atom_confs = np.array(self.data['coords'])
-        interactions = np.array(self.data['interactions'])
-        
-        for i, ac, inters in zip(range(n), atom_confs, interactions):
-            
-            values = dict(keys=inters.keys())
-            
-            
-            for intertype,vals in inters.items():
-                
-                d =  {t : None for t in vals.keys()}
-                
-                for t,pairs in vals.items():
-                    
-                    temp = np.empty(len(pairs),dtype=float)
-                    if intertype in ['connectivity','vdw']:
-                        
-                        for im,p in enumerate(pairs):
-                            
-                            r1 = np.array(ac[p[0]]) ; r2 = np.array( ac[p[1]])
-                            
-                            temp[im] =  VectorGeometry.calc_dist(r1,r2)
-                    
-                    elif intertype=='angles':
-
-                        for im,p in enumerate(pairs):
-                            
-                           
-                            
-                            r1 = np.array(ac[p[0]]) ; 
-                            r2 = np.array(ac[p[1]]) ; 
-                            r3 = np.array(ac[p[2]])
-                            
-                            temp[im] =  VectorGeometry.calc_angle(r1,r2,r3)
-                    
-                    elif intertype =='dihedrals':
-                        
-                        for im,p in enumerate(pairs):
- 
-                            r1 = np.array(ac[p[0]]) ; 
-                            r2 = np.array(ac[p[1]]) ; 
-                            r3 = np.array(ac[p[2]])
-                            r4 = np.array(ac[p[3]])
-                            
-                            temp[im] =  VectorGeometry.calc_dihedral(r1, r2, r3, r4)
-                        
-                    elif intertype=='rhos':
-                        r0 = self.rho_r0
-                        rc = self.rho_rc
-                        
-                        temp = np.empty(len(pairs),dtype=float)
-    
-                        c = self.compute_coeff(r0, rc)
-                        for im,ltpa in enumerate(pairs):
-                            rho = 0
-                            for o,p in enumerate(ltpa):
-                                        
-                                r1 = np.array(ac[p[0]]) 
-                                r2 = np.array( ac[p[1]])
-                               
-                                r12 =  VectorGeometry.calc_dist(r1,r2)
-                                rho += self.phi_rho(r12,c,r0,rc)
-
-                            temp[im] = rho
-                            
-                    else:
-                        raise Exception(NotImplemented)
-                    
-                    d[t] = temp.copy()
-                           
-                values[intertype] = d.copy()
-
-                
-            all_Values[i] = values
-
-        self.data['values'] = all_Values
-        #self.calc_neibs_lists()
-        #self.calc_rhats()
-        self.calc_descriptor_info()
-        return
     
     def calc_descriptor_info(self):
-        """Compute full descriptor info including values and gradients for all configurations."""
+        """Compute full descriptor info including values and gradients for all configurations.
+        
+        If the data contains a 'lattice' column with (3,3) lattice vectors,
+        minimum image convention is applied for periodic boundary conditions.
+        """
         
         n = len(self.data)
         
@@ -5813,10 +6109,24 @@ class Interactions():
         atom_confs = np.array(self.data['coords'])
         interactions = np.array(self.data['interactions'])
         
+        # Check if lattice column exists
+        has_lattice_column = 'lattice' in self.data.columns
+        if has_lattice_column:
+            lattices = np.array(self.data['lattice'])
+        
         for m, ac, inters in zip(range(n), atom_confs, interactions):
             
             descriptor_info = dict(keys=inters.keys())
             
+            # Check per-datapoint if lattice is not None
+            use_mic = False
+            if has_lattice_column and lattices[m] is not None:
+                lattice = np.array(lattices[m], dtype=np.float64)
+                inv_lattice = np.linalg.inv(lattice)
+                use_mic = True
+            else:
+                lattice = None
+                inv_lattice = None
             
             for intertype,vals in inters.items():
                 
@@ -5842,8 +6152,13 @@ class Interactions():
                             
                             i_index[ip] = i
                             j_index[ip] = j
-                            r[ip] =  VectorGeometry.calc_dist(r1,r2)
-                            partial_ri[ip] =  VectorGeometry.calc_unitvec(r1,r2)
+                            
+                            if use_mic:
+                                r[ip] = VectorGeometry.calc_dist_mic(r1, r2, lattice, inv_lattice)
+                                partial_ri[ip] = VectorGeometry.calc_unitvec_mic(r1, r2, lattice, inv_lattice)
+                            else:
+                                r[ip] = VectorGeometry.calc_dist(r1, r2)
+                                partial_ri[ip] = VectorGeometry.calc_unitvec(r1, r2)
                        
                         temp = {'values':r, 'partial_ri':partial_ri,
                                 'i_index':i_index,'j_index':j_index}
@@ -5869,8 +6184,12 @@ class Interactions():
                             j_index[ip] = j
                             k_index[ip] = k
                             
-                            pa[ip], pc[ip] = VectorGeometry.calc_angle_pa_pc(r1,r2,r3)
-                            angles[ip] =  VectorGeometry.calc_angle(r1,r2,r3)
+                            if use_mic:
+                                pa[ip], pc[ip] = VectorGeometry.calc_angle_pa_pc_mic(r1, r2, r3, lattice, inv_lattice)
+                                angles[ip] = VectorGeometry.calc_angle_mic(r1, r2, r3, lattice, inv_lattice)
+                            else:
+                                pa[ip], pc[ip] = VectorGeometry.calc_angle_pa_pc(r1, r2, r3)
+                                angles[ip] = VectorGeometry.calc_angle(r1, r2, r3)
                         
                         temp = {'values':angles, 'pa':pa, 'pc': pc,
                                 'i_index':i_index, 'j_index':j_index,
@@ -5903,14 +6222,19 @@ class Interactions():
                             k_index[ip] = k
                             l_index[ip] = l
                             
-                            
-                            grad = VectorGeometry.calc_dihedral_grad(r1,r2,r3,r4)
+                            if use_mic:
+                                # For MIC, we need to use the MIC-corrected dihedral
+                                # Gradient calculation with MIC requires special handling
+                                grad = VectorGeometry.calc_dihedral_grad_mic(r1, r2, r3, r4, lattice, inv_lattice)
+                                dihedrals[ip] = VectorGeometry.calc_dihedral_mic(r1, r2, r3, r4, lattice, inv_lattice)
+                            else:
+                                grad = VectorGeometry.calc_dihedral_grad(r1, r2, r3, r4)
+                                dihedrals[ip] = VectorGeometry.calc_dihedral(r1, r2, r3, r4)
                             
                             dri[ip] = grad[0] 
                             drj[ip] = grad[1]
                             drk[ip] = grad[2]
                             drl[ip] = grad[3]
-                            dihedrals[ip] =  VectorGeometry.calc_dihedral(r1, r2, r3, r4)
                             
                         temp = {'values':dihedrals, 'dri':dri, 'drj': drj,
                                 'drk':drk,'drl':drl,
@@ -5947,8 +6271,12 @@ class Interactions():
                                 j_index[tot_iter] = j
                                 to_pair_index[tot_iter] = iv
                                 
-                                r12 =  VectorGeometry.calc_dist(r1,r2)
-                                dirvec = self.dphi_rho(r12,c,r0,rc) * VectorGeometry.calc_unitvec(r1,r2)
+                                if use_mic:
+                                    r12 = VectorGeometry.calc_dist_mic(r1, r2, lattice, inv_lattice)
+                                    dirvec = self.dphi_rho(r12, c, r0, rc) * VectorGeometry.calc_unitvec_mic(r1, r2, lattice, inv_lattice)
+                                else:
+                                    r12 = VectorGeometry.calc_dist(r1, r2)
+                                    dirvec = self.dphi_rho(r12, c, r0, rc) * VectorGeometry.calc_unitvec(r1, r2)
                                 v_ij[tot_iter] = dirvec
                                 
                                 rho += self.phi_rho(r12,c,r0,rc)
@@ -6418,7 +6746,11 @@ class Data_Manager():
         return
     
     def create_dist_matrix(self):
-        """Compute pairwise distance matrices for all configurations."""
+        """Compute pairwise distance matrices for all configurations.
+        
+        If the data contains a 'lattice' column with (3,3) lattice vectors,
+        minimum image convention is applied for periodic boundary conditions.
+        """
         logger.info('Calculating distance matrix for all configurations \n This is a heavy calculation consider pickling your data')
         i=0
         dataframe = self.data
@@ -6426,15 +6758,33 @@ class Data_Manager():
         All_dist_m = np.empty(size,dtype=object)
         at_conf = dataframe['coords'].to_numpy()
         nas = dataframe['natoms'].to_numpy()
+        
+        # Check if lattice column exists
+        has_lattice_column = 'lattice' in dataframe.columns
+        if has_lattice_column:
+            lattices = dataframe['lattice'].to_numpy()
+        
         for i in range(size):
             natoms = nas[i]
             conf = at_conf[i]
             dist_matrix = np.empty((natoms,natoms))
+            
+            # Check per-datapoint if lattice is not None
+            use_mic = False
+            if has_lattice_column and lattices[i] is not None:
+                lattice = np.array(lattices[i], dtype=np.float64)
+                inv_lattice = np.linalg.inv(lattice)
+                use_mic = True
+            
             for m in range(0,natoms):
                 for n in range(m,natoms):
                     r1 = np.array(conf[n])
                     r2 = np.array(conf[m])
-                    rr = VectorGeometry.calc_dist(r1,r2)
+                    if use_mic:
+                        #print(r1, r2, lattice, inv_lattice)
+                        rr = VectorGeometry.calc_dist_mic(r1, r2, lattice, inv_lattice)
+                    else:
+                        rr = VectorGeometry.calc_dist(r1, r2)
                     dist_matrix[m,n] = rr
                     dist_matrix[n,m] = rr
             All_dist_m[i] = dist_matrix
@@ -6751,12 +7101,29 @@ class FF_Optimizer(Optimizer):
         Fclass_array = self.computeForceClass(params, n_forces, models_list_info)
         
         Fclass = {m: np.zeros( (natoms,3),dtype=float) for m, natoms in enumerate(natoms_per_point) }
-        for m  in range(ndata):
-            for model_info in models_list_info:
-                nat_low = model_info.nat_low
-                nat_up = model_info.nat_up
-                Fclass[m] = Fclass_array[nat_low[m]:nat_up[m]].copy() 
         
+        nat_low = models_list_info[0].nat_low
+        nat_up = models_list_info[0].nat_up
+        for m  in range(ndata):
+                x = Fclass_array[nat_low[m]:nat_up[m]].copy()
+                Fclass[m] = x
+                '''
+                y = self.data.loc[index[m],'Forces'] 
+                d= np.abs(x[-16:]-y[-16:])
+                da = d.max(axis=1).argmax()
+                if d.max()>7:
+                    k = x[-16:][da]-y[-16:][da]
+                    kdir = np.abs(k).argmax()
+                    dirs = {0:'x',1:'y',2:'z'}
+                    xp = x[-16:][da][kdir]
+                    yp = y[-16:][da][kdir]
+                    if k[kdir] < 0:
+                        print(f'{m} {index[m]} underpredicting on {dirs[kdir]} --> pred = {xp :5.4f} , true = {yp :5.4f}' )
+                    else:
+                        print(f'{m} {index[m]} overpredicting on {dirs[kdir]} --> pred = {xp :5.4f} , true = {yp :5.4f}' )
+                    #print(m, index[m], d.max(), x[-16:] [da] ,y[-16:] [da] )
+                '''
+                
         
         index = self.get_indexes(dataset)
         self.data.loc[index,'Uclass'] = Uclass
@@ -7379,13 +7746,14 @@ class FF_Optimizer(Optimizer):
                      Energy, Forces, lambda_force, models_list_info,
                      reg, reguls,
                      measure,reg_measure,
+                     force_filter=None,
                      mu_e =0.0, std_e=1.0,
                      mu_f = 0.0, std_f=1.0):
         """Compute total cost combining energy, force, and regularization terms."""
         
         cE = CostFunctions.Energy(params, Energy, models_list_info, measure, mu_e,std_e)
         cR = reg*CostFunctions.Regularization(params,reguls,reg_measure) 
-        cF = CostFunctions.Forces(params, Forces, models_list_info, measure, mu_f,std_f) 
+        cF = CostFunctions.Forces(params, Forces, models_list_info, measure, mu_f,std_f, force_filter) 
         cost = (1.0-lambda_force)*cE + lambda_force*cF + cR
         return cost
     
@@ -7394,12 +7762,13 @@ class FF_Optimizer(Optimizer):
                 Energy, Forces, lambda_force, models_list_info,
                 reg,reguls,
                 measure,reg_measure,
+                force_filter=None,
                 mu_e =0.0, std_e=1.0,
                 mu_f = 0.0, std_f=1.0):
         """Compute gradient of total cost w.r.t. parameters."""
         gradE = CostFunctions.gradEnergy(params, Energy, models_list_info, measure, mu_e,std_e)
         gradR = reg*CostFunctions.gradRegularization(params,reguls,reg_measure) 
-        gradF = CostFunctions.gradForces(params, Forces, models_list_info, measure, mu_f,std_f) 
+        gradF = CostFunctions.gradForces(params, Forces, models_list_info, measure, mu_f,std_f, force_filter) 
         grads =  (1.0-lambda_force)*gradE + lambda_force*gradF + gradR
         
         return grads
@@ -7745,23 +8114,80 @@ class FF_Optimizer(Optimizer):
                     params[change_id] = 0.999*blow if blow < 0 else 1.001*blow
         return params
     
+    
+    def get_Forces_and_ForceClass(self, dataset):
+        
+        forces_true, forces_filter = self.get_true_Forces(dataset)
+
+        fp = self.get_dataDict(dataset,'Fclass').values()
+        forces_pred = []
+        for f in fp:
+            for fatom in f:
+                forces_pred.append(fatom)
+
+        return np.array(forces_true), np.array(forces_pred), forces_filter
+
     def get_true_Forces(self,dataset):
-        """Get reference forces as a flattened array."""
-        fv = self.get_dataDict(dataset,'Forces').values()
+        """Get reference forces as a flattened array with optional force filter.
+        
+        Returns
+        -------
+        Forces : numpy.ndarray
+            Flattened forces array of shape (n_atoms * 3,).
+        force_filter : numpy.ndarray[bool]
+            Boolean filter where True means include in optimization.
+            If not_optimize_force_for is empty, returns None.
+        """
+        data_dict = self.get_dataDict(dataset,'Forces')
+        fv = data_dict.values()
+        
         Forces = []
         for f in fv:
             for fatom in f:
                 Forces.append(fatom)
         Forces = np.array(Forces)
-        return Forces
+        
+        # Build force filter based on not_optimize_force_for
+        exclude_list = self.setup.not_optimize_force_for
+        if len(exclude_list) == 0:
+            return Forces, None
+        
+        # Get atom types for the dataset
+        at_types_dict = self.get_dataDict(dataset, 'at_type')
+        
+        # Check if exclude_list contains strings (atom types) or integers (indices)
+        if isinstance(exclude_list[0], str):
+            # Filter by atom type
+            force_filter = []
+            for idx in data_dict.keys():
+                at_types = at_types_dict[idx]
+                for at in at_types:
+                    # True if atom type is NOT in exclude list (include in optimization)
+                    include = at not in exclude_list
+                    # Each atom has 3 force components
+                    force_filter.append(include)
+            force_filter = np.array(force_filter, dtype=bool)
+        else:
+            # Filter by atom indices (0-based within each configuration)
+            exclude_indices = set(exclude_list)
+            force_filter = []
+            for idx in data_dict.keys():
+                natoms = len(at_types_dict[idx])
+                for atom_idx in range(natoms):
+                    include = atom_idx not in exclude_indices
+                    force_filter.append(include)
+            force_filter = np.array(force_filter, dtype=bool)
+        assert force_filter.shape[0] == Forces.shape[0], f"Force filter shape does not match Forces shape: --> {force_filter.shape} {Forces.shape}"
+        
+        return Forces, force_filter
     
     def get_params_n_args(self,setfrom,dataset):
         """Prepare parameters and arguments for optimization."""
         
         E = self.get_Energy(dataset)
         
-        Forces = self.get_true_Forces(dataset)
-        
+        Forces, force_filter = self.get_true_Forces(dataset)
+        self.force_filter = force_filter
         
         weights =  GeneralFunctions.weighting(self.data_train,
                 self.setup.weighting_method,self.setup.bT,self.setup.w)
@@ -7779,9 +8205,10 @@ class FF_Optimizer(Optimizer):
         
         args = (E,Forces,self.setup.lambda_force,
                 models_list_info, 
-                max(self.setup.reg_par,1.e-4/E.shape[0] ), reguls,
+                self.setup.reg_par, reguls,
                 self.setup.costf,
-                self.setup.regularization_method)
+                self.setup.regularization_method,
+                force_filter)
         
         return params, bounds, args, fixed_parameters, isnot_fixed
 
@@ -7796,7 +8223,8 @@ class FF_Optimizer(Optimizer):
         (Energy,Forces, lambda_force,models_list_info, 
                  reg_par, reguls,
                  measure,
-                 measure_reg ) = args
+                 measure_reg,
+                 force_filter) = args
         
         normalize_data = self.setup.normalize_data
         if normalize_data:
@@ -7881,7 +8309,8 @@ class FF_Optimizer(Optimizer):
         (Energy,Forces, lambda_force,models_list_info, 
                  reg_par, reguls,
                  measure,
-                 measure_reg ) = args
+                 measure_reg,
+                 force_filter) = args
         
         args_energy = (Energy, models_list_info, reg_par, reguls, measure, measure_reg)
         #args_forces = (Forces, models_list_info, reg_par, reguls, measure, measure_reg)
@@ -8005,22 +8434,22 @@ class FF_Optimizer(Optimizer):
     
     @staticmethod
     def constrainForces(params,Forces, models_list_info, 
-                   measure, value,  mu_f=0, std_f=0 ):
+                   measure, value,  mu_f=0, std_f=0, force_filter=None):
         """Constraint function: force cost minus target value."""
-        cF = CostFunctions.Forces(params, Forces, models_list_info, measure, mu_f,std_f)
+        cF = CostFunctions.Forces(params, Forces, models_list_info, measure, mu_f,std_f, force_filter)
         return cF - value 
     @staticmethod
     def gradconstrainForces(params,Forces, models_list_info, 
-                    measure, value, mu_f=0, std_f=0):
+                    measure, value, mu_f=0, std_f=0, force_filter=None):
         """Gradient of force constraint."""
-        gF = CostFunctions.gradForces(params, Forces, models_list_info, measure, mu_f,std_f)
+        gF = CostFunctions.gradForces(params, Forces, models_list_info, measure, mu_f,std_f, force_filter)
         return gF 
     @staticmethod
     def costForces(params,Forces, models_list_info, 
-                   reg_par, reguls, measure, measure_reg, mu_f=0, std_f=0):
+                   reg_par, reguls, measure, measure_reg, mu_f=0, std_f=0, force_filter=None):
         """Compute force cost with regularization."""
         cR = reg_par*CostFunctions.Regularization(params,reguls,measure_reg) 
-        cF = CostFunctions.Forces(params, Forces, models_list_info, measure, mu_f,std_f)
+        cF = CostFunctions.Forces(params, Forces, models_list_info, measure, mu_f,std_f, force_filter)
         return cF + cR 
     
     @staticmethod
@@ -8033,10 +8462,10 @@ class FF_Optimizer(Optimizer):
     
     @staticmethod
     def gradForces(params,Forces, models_list_info, 
-                   reg_par, reguls, measure, measure_reg, mu_f=0, std_f=0):
+                   reg_par, reguls, measure, measure_reg, mu_f=0, std_f=0, force_filter=None):
         """Gradient of force cost with regularization."""
         gR = reg_par*CostFunctions.gradRegularization(params,reguls,measure_reg) 
-        gF = CostFunctions.gradForces(params, Forces, models_list_info, measure, mu_f,std_f)
+        gF = CostFunctions.gradForces(params, Forces, models_list_info, measure, mu_f,std_f, force_filter)
         return gF + gR 
     
     def optimize_params(self,setfrom='init'):
@@ -8425,7 +8854,7 @@ class FF_Optimizer(Optimizer):
                         best_cost = cost
                         best_params = params.copy()
                     
-                    if epoch % 10 == 0:
+                    if epoch % 1 == 0:
                         print(f'Adam Epoch {epoch}, Cost = {cost:.6e}')
                         sys.stdout.flush()
                     
@@ -8452,7 +8881,7 @@ class FF_Optimizer(Optimizer):
             optimization_performed=True
         else:
             optimization_performed = False
-        
+        print(f'OPTIMIZATION PERFORMED! {optimization_performed}')
         if optimization_performed:
             self.current_res = res
             self.set_models('init','opt',res.x,isnot_fixed,fixed_parameters)
@@ -8470,7 +8899,7 @@ class FF_Optimizer(Optimizer):
         """Compute normalization statistics (mean, std) for energy and forces."""
         
         Energy = self.get_Energy('train')
-        Forces = self.get_true_Forces('train')
+        Forces, force_filter = self.get_true_Forces('train')
         sysname_train = self.data_train['sys_name'].to_numpy()
         
         if dataset == 'train':
@@ -8496,8 +8925,12 @@ class FF_Optimizer(Optimizer):
                 mu_e[ids] = Energy[itr].mean()
                 std_e[ids] = Energy[itr].std()
             std_e[ std_e == 0 ] = 1.0
-        mu_f = Forces.mean()
-        std_f = Forces.std()
+        if force_filter is not None:
+            mu_f = Forces[force_filter].mean()
+            std_f = Forces[force_filter].std()
+        else:
+            mu_f = Forces.mean()
+            std_f = Forces.std()
  
         if std_f == 0: 
             std_f = 1.0 ;
@@ -8518,7 +8951,8 @@ class FF_Optimizer(Optimizer):
         (Energy,Forces, lambda_force,models_list_info, 
                  reg_par, reguls,
                  measure,
-                 measure_reg ) = args
+                 measure_reg,
+                 force_filter) = args
         
            
         normalize = self.setup.normalize_data
@@ -8533,7 +8967,9 @@ class FF_Optimizer(Optimizer):
             (Energy,Forces, lambda_force,models_list_info, 
              reg_par, reguls,
              measure,
-             measure_reg ) = args
+             measure_reg,
+             force_filter) = args
+
             for meas in np.unique(['MAE','MSE',measure]):
                 for norm in ['','norm_']:
                     if normalize and norm =='norm_':
@@ -8543,7 +8979,7 @@ class FF_Optimizer(Optimizer):
                     
                     creg = CostFunctions.Regularization(params,reguls, measure_reg)
                     ce = CostFunctions.Energy(params, Energy, models_list_info, meas, mu_e, std_e)
-                    cf = CostFunctions.Forces(params, Forces, models_list_info, meas, mu_f, std_f)
+                    cf = CostFunctions.Forces(params, Forces, models_list_info, meas, mu_f, std_f, force_filter)
                     
                     prefix = norm + meas+'_'+dataname+'_' 
                     setattr(costs,prefix + 'energy',  ce)
@@ -8665,6 +9101,19 @@ class measures:
         u = u1 -u2
         return np.sum(w*u*u)/u2.size
     
+    @staticmethod
+    def MSEo(u1,u2,w=1):
+        """Mean squared error."""
+        u = u1 -u2
+        w = w+np.abs(u2)**2/np.abs(u2.max())
+        return np.sum(w*u*u)/np.sum(w)
+    @staticmethod
+    def grad_MSEo(u1,u2,w=1):
+        """Gradient of mean squared error."""
+        u = u1 -u2
+        w = w+np.abs(u2)**2/np.abs(u2.max())
+        return 2*w*u/np.sum(w)
+
     @staticmethod
     def grad_MSE(u1,u2,w=1):
         """Gradient of mean squared error."""
@@ -9169,26 +9618,51 @@ class CostFunctions():
         
         return grad 
     
-    def Forces(params,Forces_True, models_list_info, measure, mu=0.0,std=1.0):
-        """Compute force cost using the specified measure."""
+    def Forces(params,Forces_True, models_list_info, measure, mu=0.0,std=1.0, force_filter=None):
+        """Compute force cost using the specified measure.
+        
+        Parameters
+        ----------
+        force_filter : numpy.ndarray[bool], optional
+            Boolean filter where True means include in cost calculation.
+        """
         n_forces = Forces_True.shape[0]
         
         Forces = FF_Optimizer.computeForceClass(params,n_forces,models_list_info)
+        
+        # Apply force filter if provided
+        if force_filter is not None:
+            Forces = Forces[force_filter]
+            Forces_True = Forces_True[force_filter]
         
         func = getattr(measures,measure)
         cf = func( (Forces-mu)/std, (Forces_True-mu)/std )
         return cf 
     
-    def gradForces(params,Forces_True, models_list_info, measure, mu=0.0, std=1.0):
-        """Compute gradient of force cost w.r.t. parameters."""
+    def gradForces(params,Forces_True, models_list_info, measure, mu=0.0, std=1.0, force_filter=None):
+        """Compute gradient of force cost w.r.t. parameters.
+        
+        Parameters
+        ----------
+        force_filter : numpy.ndarray[bool], optional
+            Boolean filter where True means include in cost calculation.
+        """
         n_forces = Forces_True.shape[0]
         
         Forces = FF_Optimizer.computeForceClass(params,n_forces,models_list_info)
         gradF = FF_Optimizer.computeGradForceClass(params,n_forces,models_list_info)
         
+        # Apply force filter if provided
+        if force_filter is not None:
+            Forces = Forces[force_filter]
+            Forces_True_filtered = Forces_True[force_filter]
+            gradF = gradF[:, force_filter]
+        else:
+            Forces_True_filtered = Forces_True
+        
         func = getattr(measures,'grad_'+measure)
         
-        grad = np.sum( func( (Forces -mu)/std, (Forces_True-mu)/std ) * gradF/std, axis = (1,2) )
+        grad = np.sum( func( (Forces -mu)/std, (Forces_True_filtered-mu)/std ) * gradF/std, axis = (1,2) )
         return grad
     
     def Regularization(params,reguls,reg_measure):
