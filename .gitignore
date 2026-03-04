@@ -5,6 +5,7 @@
 !.gitignore
 !FF_Develop.py
 !lammpsreader.py
+!active_learning.py
 
 
 # Keep tests
