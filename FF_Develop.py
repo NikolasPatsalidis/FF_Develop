@@ -1677,13 +1677,16 @@ class al_help():
 
 
     @staticmethod
-    def data_from_directory(path):
-        """Load a directory of `.xyz` files into a single DataFrame.
+    def data_from_directory(path, file_ext=None):
+        """Load a directory of data files into a single DataFrame.
 
         Parameters
         ----------
         path : str
-            Directory containing `.xyz` files.
+            Directory containing data files.
+        file_ext : str, optional
+            File extension to filter (e.g., '.ffdata', '.xyz'). 
+            If None, reads all files.
 
         Returns
         -------
@@ -1691,9 +1694,17 @@ class al_help():
             Concatenation of the per-file DataFrames.
         """
         data = pd.DataFrame()
-        for fname in os.listdir(path):
-            df = Data_Manager.read_xyz('{:s}/{:s}'.format(path,fname))
-            data = data.append(df,ignore_index=True) 
+        files = os.listdir(path)
+        if file_ext is not None:
+            files = [f for f in files if f.endswith(file_ext)]
+        
+        # Try both .ffdata and .xyz for backward compatibility
+        if not files and file_ext is None:
+            files = [f for f in os.listdir(path) if f.endswith('.ffdata') or f.endswith('.xyz')]
+        
+        for fname in files:
+            df = Data_Manager.read_xyz('{:s}/{:s}'.format(path, fname))
+            data = pd.concat([data, df], ignore_index=True)
         return data
     
 
@@ -2358,31 +2369,128 @@ class al_help():
         return names
 
     @staticmethod
-    def log_to_xyz(input_path,output_path,read_forces=True):
-        """Convert Gaussian `.log` files to `.xyz` datasets.
+    def log_to_ffdata(input_path, output_path, read_forces=True, dft_software='gaussian'):
+        """Convert DFT log files to `.ffdata` datasets.
 
         Parameters
         ----------
         input_path : str
-            Directory containing Gaussian `.log` outputs.
+            Directory containing DFT output files.
         output_path : str
-            Directory where `.xyz` files will be written.
+            Directory where `.ffdata` files will be written.
         read_forces : bool
-            If True, parse forces from the Gaussian output.
+            If True, parse forces from the DFT output.
+        dft_software : str
+            DFT software used: 'gaussian' or 'qespresso'.
         """
         GeneralFunctions.make_dir(output_path)
         
-        for fname in [x for x in os.listdir(input_path) if x[-4:] =='.log'] :
+        if dft_software.lower() == 'gaussian':
+            file_ext = '.log'
+            read_func = lambda fpath: Data_Manager.read_Gaussian_output(fpath, read_forces=read_forces)
+        elif dft_software.lower() in ['qespresso', 'qe', 'quantum_espresso']:
+            file_ext = '.out'
+            read_func = lambda fpath: al_help._read_qe_output_to_df(fpath, read_forces=read_forces)
+        else:
+            raise ValueError(f"Unknown DFT software: {dft_software}. Use 'gaussian' or 'qespresso'.")
+        
+        log_files = [x for x in os.listdir(input_path) if x.endswith(file_ext)]
+        if not log_files:
+            print(f"Warning: No {file_ext} files found in {input_path}")
+            return
+        
+        for fname in log_files:
             try:
-                data = Data_Manager.read_Gaussian_output('{:s}/{:s}'.format(input_path,fname),
-                        read_forces=read_forces)
+                data = read_func('{:s}/{:s}'.format(input_path, fname))
             except Exception as ve:
                 print('warning: DFT null data --> {}'.format(ve))
                 continue
          
-            labels = [c for c in data.columns if c not in ['coords','natoms','at_type','filename', 'Forces'] ]
-            Data_Manager.save_selected_data('{:s}/{:s}.xyz'.format(output_path,fname.split('.')[0]), data,labels=labels)
+            labels = [c for c in data.columns if c not in ['coords', 'natoms', 'at_type', 'filename', 'Forces']]
+            base_name = fname.rsplit('.', 1)[0]
+            Data_Manager.save_selected_data('{:s}/{:s}.ffdata'.format(output_path, base_name), data, labels=labels)
         return
+
+    @staticmethod
+    def log_to_xyz(input_path, output_path, read_forces=True, dft_software='gaussian'):
+        """Convert DFT log files to `.ffdata` datasets (legacy wrapper).
+
+        Parameters
+        ----------
+        input_path : str
+            Directory containing DFT output files.
+        output_path : str
+            Directory where `.ffdata` files will be written.
+        read_forces : bool
+            If True, parse forces from the DFT output.
+        dft_software : str
+            DFT software used: 'gaussian' or 'qespresso'.
+        
+        Note
+        ----
+        This is a legacy wrapper for backward compatibility. Use `log_to_ffdata` instead.
+        """
+        return al_help.log_to_ffdata(input_path, output_path, read_forces, dft_software)
+
+    @staticmethod
+    def _read_qe_output_to_df(filepath, read_forces=True):
+        """Read Quantum Espresso output file and return DataFrame.
+
+        Parameters
+        ----------
+        filepath : str
+            Path to QE .out file.
+        read_forces : bool
+            If True, parse forces from the output.
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with coords, at_type, Energy, natoms, and optionally Forces.
+        """
+        try:
+            import qe_io
+        except ImportError:
+            raise ImportError("qe_io module not found. Please ensure qe_io.py is in the path.")
+        
+        lines = qe_io.read_qe_output(filepath)
+        
+        # Extract data
+        at_types_list, coords_list = qe_io.extract_atomic_positions(lines)
+        energies_dict = qe_io.extract_energies(lines)
+        
+        # Use optimized energies (converged SCF)
+        energies = energies_dict['e_opt'] if energies_dict['e_opt'] else energies_dict['e_scf']
+        
+        if not energies:
+            raise ValueError(f"No converged energies found in {filepath}")
+        
+        # Extract forces if requested
+        forces_list = []
+        if read_forces:
+            forces_list = qe_io.extract_forces(lines)
+        
+        # Match data lengths
+        n_configs = min(len(at_types_list), len(coords_list), len(energies))
+        
+        # Handle forces - may have fewer entries
+        if len(forces_list) < n_configs:
+            forces_list = forces_list + [None] * (n_configs - len(forces_list))
+        
+        data_rows = []
+        for i in range(n_configs):
+            row = {
+                'at_type': list(at_types_list[i]),
+                'coords': coords_list[i],
+                'Energy': energies[i],
+                'natoms': len(at_types_list[i]),
+                'filename': filepath,
+            }
+            if read_forces and forces_list[i] is not None:
+                row['Forces'] = forces_list[i]
+            data_rows.append(row)
+        
+        return pd.DataFrame(data_rows)
 
     @staticmethod
     def make_absolute_Energy_to_interaction(data,setup):
