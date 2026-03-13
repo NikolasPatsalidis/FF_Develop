@@ -262,6 +262,10 @@ class DFTConfig(ConfigBase):
         # Pseudopotential directory
         'pseudo_dir': './pseudo',
         'pseudo_map': '',               # e.g., "C:C.pbe.UPF,O:O.pbe.UPF"
+        # QE output quality thresholds for data cleaning
+        'max_energy_error': 0.1,        # kcal/mol - maximum allowed energy error
+        'max_gradient_error': 1.0,      # kcal/mol/Å - maximum allowed gradient error  
+        'max_scf_correction': 0.5,      # kcal/mol/Å - maximum allowed SCF correction
     }
     
     def __init__(self):
@@ -481,6 +485,10 @@ class ActiveLearningPipeline:
         """
         Clean the training data.
         
+        Applies two types of cleaning:
+        1. QE quality metrics filtering (energy_error, gradient_error, scf_correction)
+        2. Standard FF cleaning (via al_help.clean_data)
+        
         Parameters
         ----------
         data : pd.DataFrame
@@ -493,9 +501,36 @@ class ActiveLearningPipeline:
         """
         print("\n--- CLEANING DATA ---")
         t0 = perf_counter()
+        n_initial = len(data)
         
+        # Step 1: Filter by QE quality metrics (if columns exist)
+        if 'energy_error' in data.columns:
+            n_before = len(data)
+            data = data[data['energy_error'] < self.dft_config.max_energy_error]
+            n_after = len(data)
+            if n_before != n_after:
+                print(f'  Removed {n_before - n_after} configs with energy_error >= {self.dft_config.max_energy_error}')
+        
+        if 'gradient_error' in data.columns:
+            n_before = len(data)
+            data = data[data['gradient_error'] < self.dft_config.max_gradient_error]
+            n_after = len(data)
+            if n_before != n_after:
+                print(f'  Removed {n_before - n_after} configs with gradient_error >= {self.dft_config.max_gradient_error}')
+        
+        if 'scf_correction' in data.columns:
+            n_before = len(data)
+            data = data[data['scf_correction'] < self.dft_config.max_scf_correction]
+            n_after = len(data)
+            if n_before != n_after:
+                print(f'  Removed {n_before - n_after} configs with scf_correction >= {self.dft_config.max_scf_correction}')
+        
+        n_after_qe = len(data)
+        print(f'After QE quality filtering: {n_initial} -> {n_after_qe} configs')
+        
+        # Step 2: Standard FF cleaning
         data = self.al.clean_data(data, self.setup, self.beta_sampling)
-        print('After cleaning:')
+        print('After FF cleaning:')
         self._print_column_stats(data['Energy'])
         
         print(f'Data cleaning time = {perf_counter() - t0:.3e} sec')

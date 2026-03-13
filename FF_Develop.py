@@ -2447,6 +2447,7 @@ class al_help():
         -------
         pd.DataFrame
             DataFrame with coords, at_type, Energy, natoms, and optionally Forces.
+            Also includes QE metrics: energy_error, gradient_error, scf_correction.
         """
         try:
             import qe_io
@@ -2470,12 +2471,29 @@ class al_help():
         if read_forces:
             forces_list = qe_io.extract_forces(lines)
         
+        # Extract QE error metrics
+        errors = qe_io.extract_errors(lines)
+        energy_errors = errors.get('energy_error', [])
+        gradient_errors = errors.get('gradient_error', [])
+        scf_corrections = errors.get('scf_correction', [])
+        
         # Match data lengths
         n_configs = min(len(at_types_list), len(coords_list), len(energies))
         
         # Handle forces - may have fewer entries
         if len(forces_list) < n_configs:
             forces_list = forces_list + [None] * (n_configs - len(forces_list))
+        
+        # Handle error metrics - may have fewer entries, pad with NaN
+        def pad_array(arr, target_len):
+            arr = list(arr) if hasattr(arr, '__iter__') else []
+            if len(arr) < target_len:
+                arr = arr + [np.nan] * (target_len - len(arr))
+            return arr[:target_len]
+        
+        energy_errors = pad_array(energy_errors, n_configs)
+        gradient_errors = pad_array(gradient_errors, n_configs)
+        scf_corrections = pad_array(scf_corrections, n_configs)
         
         data_rows = []
         for i in range(n_configs):
@@ -2485,6 +2503,9 @@ class al_help():
                 'Energy': energies[i],
                 'natoms': len(at_types_list[i]),
                 'filename': filepath,
+                'energy_error': energy_errors[i],
+                'gradient_error': gradient_errors[i],
+                'scf_correction': scf_corrections[i],
             }
             if read_forces and forces_list[i] is not None:
                 row['Forces'] = forces_list[i]
