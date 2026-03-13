@@ -4910,14 +4910,18 @@ class Setup_Interfacial_Optimization():
     executes = ['distance_map','reference_energy','struct_types','rigid_types',
             'lammps_potential_extra_lines','extra_pair_coeff','not_optimize_force_for']
     
-    def __init__(self,fname):
+    def __init__(self, methodology_file, potential_file=None):
         '''
         A Constructor of the setup of Interfacial Optimization
         
         Parameters
         ----------
-        fname : string
-            File to read the setup.
+        methodology_file : string
+            File containing methodology/training parameters.
+            For backward compatibility, can also be a combined file.
+        potential_file : string, optional
+            File containing potential model definitions (sections with & and /).
+            If None, assumes methodology_file contains both sections (legacy mode).
         Raises
         ------
         Exception
@@ -4928,90 +4932,109 @@ class Setup_Interfacial_Optimization():
         None.        
         '''
         
-        #print('setting algorithm from file "{:s}"'.format(fname))
-        def my_setattr(self,attrname,val,defaults):
+        def my_setattr(self, attrname, val, defaults):
             if attrname not in defaults:
                 raise Exception('InputError: Uknown input variable "{:s}"'.format(attrname))
             ty = type(defaults[attrname])
             if ty is list or ty is tuple:
-                
                 tyi = type(defaults[attrname][0])
                 attr = ty([tyi(v) for v in val])
             else:
                 attr = ty(val)
-            setattr(self,attrname,attr)
-
+            setattr(self, attrname, attr)
             return
-        # Defaults
-
         
         defaults = self.defaults
         
-        with open(fname,'r') as f:
-            lines = f.readlines() 
-            f.closed
+        # Read methodology file
+        with open(methodology_file, 'r') as f:
+            methodology_lines = f.readlines()
         
-        #strip comments
-        for j,line in enumerate(lines):
-            for i,s in enumerate(line):
-                if '#' == s: 
-                    lines[j]=lines[j][:i]+'\n'
-                lines[j] = lines[j].strip()
-                
+        # Strip comments and whitespace
+        for j, line in enumerate(methodology_lines):
+            for i, s in enumerate(line):
+                if '#' == s:
+                    methodology_lines[j] = methodology_lines[j][:i] + '\n'
+            methodology_lines[j] = methodology_lines[j].strip()
+        
+        # Check if potential_file is provided or if we're in legacy mode
+        if potential_file is None:
+            # Legacy mode: methodology_file contains everything
+            all_lines = methodology_lines
+            potential_lines = methodology_lines
+        else:
+            # New modular mode: read potential file separately
+            with open(potential_file, 'r') as f:
+                potential_lines = f.readlines()
+            for j, line in enumerate(potential_lines):
+                for i, s in enumerate(line):
+                    if '#' == s:
+                        potential_lines[j] = potential_lines[j][:i] + '\n'
+                potential_lines[j] = potential_lines[j].strip()
+            all_lines = methodology_lines
+        
+        # Find section lines (model definitions starting with &)
         section_lines = dict()
-        for j,line in enumerate(lines):
+        for j, line in enumerate(potential_lines):
             if '&' in line:
                 section_lines[line.split('&')[-1].strip()] = j
         
-        #get_attributes
-        for j,line in enumerate(lines):
-            
+        # Get methodology attributes (key-value pairs before & sections)
+        for j, line in enumerate(all_lines):
             if '&' in line:
-                break 
+                break
             
             if '=' in line:
                 li = line.split('=')
-                var = li[0].strip() ; value = li[1].strip()
+                var = li[0].strip()
+                value = li[1].strip()
                 if value.isdigit():
                     value = int(value)
-                elif value.replace('.','',1).isdigit():
+                elif value.replace('.', '', 1).isdigit():
                     value = float(value)
                 elif var in self.executes:
                     value = str(value)
-                   #print(var,'=',value)
             elif ':' in line:
                 li = line.split(':')
-                var = li[0].strip() ; value = [] 
+                var = li[0].strip()
+                value = []
                 for x in li[1].split():
-                    if x.isdigit(): y = int(x)
-                    elif x.replace('.','',1).isdigit(): y = float(x)
-                    else: y = x
+                    if x.isdigit():
+                        y = int(x)
+                    elif x.replace('.', '', 1).isdigit():
+                        y = float(x)
+                    else:
+                        y = x
                     value.append(y)
             else:
                 continue
-   
-            my_setattr(self,var,value,defaults)
             
-        for atname,de in defaults.items():
-            if not hasattr(self,atname):
-                setattr(self,atname,de)
-        #Get initial conditions
+            my_setattr(self, var, value, defaults)
+        
+        # Set defaults for missing attributes
+        for atname, de in defaults.items():
+            if not hasattr(self, atname):
+                setattr(self, atname, de)
+        
+        # Get initial model conditions from potential file
         models = dict()
-        for key,sl in section_lines.items():
+        for key, sl in section_lines.items():
             name = key
-            #print(name)
-            obj = self.model_interaction(lines[sl:],key)
-            attrname = 'init' +name 
-            setattr(self,attrname,obj)
+            obj = self.model_interaction(potential_lines[sl:], key)
+            attrname = 'init' + name
+            setattr(self, attrname, obj)
             models[name] = obj
         self.init_models = models
         self.nonchanging_init_models = copy.deepcopy(models)
-        #execute the string related commands
+        
+        # Execute the string related commands
         for e in self.executes:
-            #print(e)
-            exec_string = "setattr(self,e, {:})".format(getattr(self,e))
-            #print(exec_string)
+            exec_string = "setattr(self,e, {:})".format(getattr(self, e))
             exec(exec_string)
+        
+        # Store file paths for writing back
+        self._methodology_file = methodology_file
+        self._potential_file = potential_file
         return 
 
     def excess_model(self,cat,num):
@@ -5324,19 +5347,26 @@ class Setup_Interfacial_Optimization():
         return r
     
 
-    def write_running_output(self):
-        """Write the current configuration to a `.in` file for reproducibility."""
+    def write_running_output(self, separate_files=True):
+        """Write the current configuration to input files for reproducibility.
+        
+        Parameters
+        ----------
+        separate_files : bool
+            If True, writes methodology.in and potential.in separately.
+            If False, writes combined runned.in (legacy mode).
+        """
 
-        def type_var(v,ti,s):
-            if ti is int: s+='{:d} '.format(v)
-            elif ti is str: s+='{:s} '.format(v)
-            elif ti is float: s+='{:7.8f} '.format(v)
+        def type_var(v, ti, s):
+            if ti is int: s += '{:d} '.format(v)
+            elif ti is str: s += '{:s} '.format(v)
+            elif ti is float: s += '{:7.8f} '.format(v)
             elif ti is bool:
-                if v: s+='1 ' 
-                else: s+='0 '
+                if v: s += '1 '
+                else: s += '0 '
             return s
 
-        def write(file,name,var):
+        def write(file, name, var):
             s = '{:15s}'.format(name)
             t = type(var)
 
@@ -5344,43 +5374,64 @@ class Setup_Interfacial_Optimization():
                 try:
                     ti = type(var[0])
                 except IndexError:
-                    s+= ' : '
+                    s += ' : '
                 else:
-                    s +=' : '
+                    s += ' : '
                     for v in var:
-                        s = type_var(v,ti,s)
+                        s = type_var(v, ti, s)
             else:
-                s+= ' = '
-                s = type_var(var,t,s)
-            s+='\n'
+                s += ' = '
+                s = type_var(var, t, s)
+            s += '\n'
             
             file.write(s)
             return
         
-        fname = '{:s}/runned.in'.format(self.runpath)
-        with open(fname,'w') as file:
-            add_empty_line = ['runpath_attributes','bS','costf','lambda_force','normalize_data','reg_par',
-                              'tolerance','seed','recombination','visit','bT','nAN','rho_rc'] 
+        def write_methodology(file):
+            """Write methodology/training parameters."""
+            add_empty_line = ['runpath_attributes', 'bS', 'costf', 'lambda_force', 'normalize_data', 'reg_par',
+                              'tolerance', 'seed', 'recombination', 'visit', 'bT', 'nAN', 'rho_rc']
             
-            for i,(k,v) in enumerate(self.defaults.items()):
-                var = getattr(self,k)
+            for i, (k, v) in enumerate(self.defaults.items()):
+                var = getattr(self, k)
                 if k in self.executes:
                     var = str(var)
-                write(file,k,var)
-                if k in add_empty_line: 
+                write(file, k, var)
+                if k in add_empty_line:
                     file.write('\n')
             file.write('\n')
-            
-            for k,model in self.opt_models.items() :
+        
+        def write_potential(file):
+            """Write potential model definitions."""
+            for k, model in self.opt_models.items():
                 file.write('&{:s}\n'.format(k))
                 file.write('FUNC {:s}\n'.format(model.model))
-                for k,p in model.pinfo.items():
+                for k, p in model.pinfo.items():
                     file.write('{:10s} : {:14.13f}  {:d}  {:6.5f}  {:6.5f}    {:6.5f} \n'.format(
-                                    p.name, p.value, int(p.opt),p.low_bound, p.upper_bound,p.regul))
-                
+                                    p.name, p.value, int(p.opt), p.low_bound, p.upper_bound, p.regul))
                 file.write('/\n\n')
-                
-            file.closed
+        
+        if separate_files:
+            # Write methodology.in
+            methodology_fname = '{:s}/methodology.in'.format(self.runpath)
+            with open(methodology_fname, 'w') as file:
+                file.write('# Methodology/Training Parameters\n')
+                file.write('# Generated by FF_Develop\n\n')
+                write_methodology(file)
+            
+            # Write potential.in
+            potential_fname = '{:s}/potential.in'.format(self.runpath)
+            with open(potential_fname, 'w') as file:
+                file.write('# Potential Model Definitions\n')
+                file.write('# Generated by FF_Develop\n\n')
+                write_potential(file)
+        else:
+            # Legacy mode: write combined runned.in
+            fname = '{:s}/runned.in'.format(self.runpath)
+            with open(fname, 'w') as file:
+                write_methodology(file)
+                write_potential(file)
+        
         return
                     
     def __repr__(self):
