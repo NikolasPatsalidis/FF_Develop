@@ -508,22 +508,19 @@ class ActiveLearningPipeline:
             n_before = len(data)
             data = data[data['energy_error'] < self.dft_config.max_energy_error]
             n_after = len(data)
-            if n_before != n_after:
-                print(f'  Removed {n_before - n_after} configs with energy_error >= {self.dft_config.max_energy_error}')
+            print(f'  Removed {n_before - n_after} configs with energy_error >= {self.dft_config.max_energy_error}  |  max = {data["energy_error"].max():4.3} ')
         
         if 'gradient_error' in data.columns:
             n_before = len(data)
             data = data[data['gradient_error'] < self.dft_config.max_gradient_error]
             n_after = len(data)
-            if n_before != n_after:
-                print(f'  Removed {n_before - n_after} configs with gradient_error >= {self.dft_config.max_gradient_error}')
+            print(f'  Removed {n_before - n_after} configs with gradient_error >= {self.dft_config.max_gradient_error}   |  max = {data["gradient_error"].max():4.3}')
         
         if 'scf_correction' in data.columns:
             n_before = len(data)
             data = data[data['scf_correction'] < self.dft_config.max_scf_correction]
             n_after = len(data)
-            if n_before != n_after:
-                print(f'  Removed {n_before - n_after} configs with scf_correction >= {self.dft_config.max_scf_correction}')
+            print(f'  Removed {n_before - n_after} configs with scf_correction >= {self.dft_config.max_scf_correction}  |  max = {data["scf_correction"].max():4.3}')
         
         n_after_qe = len(data)
         print(f'After QE quality filtering: {n_initial} -> {n_after_qe} configs')

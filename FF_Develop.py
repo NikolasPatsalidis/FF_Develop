@@ -2498,6 +2498,13 @@ class al_help():
         
         data_rows = []
         for i in range(n_configs):
+            # find a sys_name based on stoichiometry
+            ats = np.array(at_types_list[i])
+            u = np.unique(ats)
+            nums = {x:np.count_nonzero( ats == x) for x in u}
+            sys_name = ''.join([str(k) + str(v) for k,v in nums.items()])
+            #########
+
             row = {
                 'at_type': list(at_types_list[i]),
                 'coords': coords_list[i],
@@ -2507,6 +2514,7 @@ class al_help():
                 'energy_error': energy_errors[i],
                 'gradient_error': gradient_errors[i],
                 'scf_correction': scf_corrections[i],
+                'sys_name':sys_name,
             }
             if read_forces and forces_list[i] is not None:
                 row['Forces'] = forces_list[i]
