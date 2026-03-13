@@ -5266,7 +5266,7 @@ class Setup_Interfacial_Optimization():
             self.category = prefix.split()[0][:2]
             self.num = int(prefix[2])
             
-            if self.category in ['PW',]:
+            if self.category in ['PW', 'BO']:
                 inter = self.sort_type(inter)
             else:
                 inter = tuple(inter)
