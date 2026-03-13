@@ -249,7 +249,7 @@ class DFTConfig(ConfigBase):
         'executable': 'pw.x',
         'mpi_command': 'mpirun -np 4',
         'input_extension': '.in',
-        'output_extension': '.out',
+        'output_extension': '.log',
         # QE specific
         'ecutwfc': 80.0,
         'ecutrho': 320.0,

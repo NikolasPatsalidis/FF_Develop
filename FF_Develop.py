@@ -2389,7 +2389,8 @@ class al_help():
             file_ext = '.log'
             read_func = lambda fpath: Data_Manager.read_Gaussian_output(fpath, read_forces=read_forces)
         elif dft_software.lower() in ['qespresso', 'qe', 'quantum_espresso']:
-            file_ext = '.out'
+            file_ext = '.log'
+            print('I am in the function log_to_ffdata looking for QE files')
             read_func = lambda fpath: al_help._read_qe_output_to_df(fpath, read_forces=read_forces)
         else:
             raise ValueError(f"Unknown DFT software: {dft_software}. Use 'gaussian' or 'qespresso'.")
