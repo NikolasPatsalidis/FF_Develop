@@ -558,7 +558,7 @@ class ActiveLearningPipeline:
         sys.stdout.flush()
         
         # Write errors
-        self.al.write_errors(model_costs, iteration)
+        self.al.write_errors(optimizer.current_costs, iteration)
         
         print(f'Total training step time = {perf_counter() - t0:.3e} sec')
     
