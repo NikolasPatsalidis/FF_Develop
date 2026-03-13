@@ -302,7 +302,7 @@ class ActiveLearningPipeline:
     Parameters
     ----------
     methodology_file : str
-        Path to methodology.in (training parameters).
+        Path to training.in (training parameters).
     potential_file : str
         Path to potential.in (model definitions).
     al_config : ActiveLearningConfig
@@ -319,7 +319,7 @@ class ActiveLearningPipeline:
     
     def __init__(self, methodology_file, potential_file, 
                  al_config=None, scheduler_config=None, dft_config=None,
-                 datapath='data', results_path='Results'):
+                 datapath='data_al', results_path='Results_al'):
         
         # Store file paths
         self.methodology_file = methodology_file
@@ -328,9 +328,21 @@ class ActiveLearningPipeline:
         self.results_path = results_path
         
         # Load configurations (use defaults if not provided)
+        
         self.al_config = al_config if al_config else ActiveLearningConfig()
+        
+        if not al_config:
+            print('Warning: Default active learning methods are used')
+        
         self.scheduler_config = scheduler_config if scheduler_config else SchedulerConfig()
+        
+        if not scheduler_config:
+            print('Warning: Default scheduler_config methods are used')
+        
         self.dft_config = dft_config if dft_config else DFTConfig()
+        
+        if not dft_config:
+            print('Warning: Default dft_config methods are used')
         
         # Extract commonly used parameters
         self.n_iterations = self.al_config.n_iterations
@@ -363,6 +375,8 @@ class ActiveLearningPipeline:
         # Create directories
         os.makedirs(self.results_path, exist_ok=True)
         os.makedirs(self.datapath, exist_ok=True)
+        
+        return
         
     def run(self, start_iteration=0):
         """
@@ -414,7 +428,7 @@ class ActiveLearningPipeline:
             print(f"\nIteration {iteration} completed in {perf_counter() - t_iter_start:.2f} sec")
             
             # Update input files for next iteration (from results folder)
-            self.methodology_file = f"{self.setup.runpath}/methodology.in"
+            self.methodology_file = f"{self.setup.runpath}/training.in"
             self.potential_file = f"{self.setup.runpath}/potential.in"
             self.setup = ff.Setup_Interfacial_Optimization(self.methodology_file, self.potential_file)
             
@@ -853,15 +867,15 @@ def parse_arguments():
 Input Files:
   The pipeline uses 5 separate input files for modular configuration:
   
-  1. methodology.in  - Training/optimization parameters
+  1. training.in  - Training/optimization parameters
   2. potential.in    - Force field model definitions (& sections)
-  3. active_learning.in - Sampling parameters and iteration settings
+  3. al.in - Sampling parameters and iteration settings
   4. scheduler.in    - HPC scheduler settings (SLURM/PBS)
   5. dft.in          - DFT software settings (QE/Gaussian)
 
 Examples:
   # Using separate input files (recommended)
-  python active_learning.py -m methodology.in -p potential.in -al active_learning.in -sc scheduler.in -dft dft.in
+  python active_learning.py -m training.in -p potential.in -al al.in -sc scheduler.in -dft dft.in
 
   # Using legacy combined input file
   python active_learning.py -f combined.in
@@ -873,24 +887,20 @@ Examples:
     
     # Input file arguments (modular mode)
     parser.add_argument('-m', '--methodology_file', type=str, default=None,
-                        help='Methodology/training parameters file (methodology.in)')
+                        help='Methodology/training parameters file (training.in)')
     parser.add_argument('-p', '--potential_file', type=str, default=None,
                         help='Potential model definitions file (potential.in)')
     parser.add_argument('-al', '--al_config_file', type=str, default=None,
-                        help='Active learning config file (active_learning.in)')
+                        help='Active learning config file (al.in)')
     parser.add_argument('-sc', '--scheduler_file', type=str, default=None,
                         help='Scheduler config file (scheduler.in)')
     parser.add_argument('-dft', '--dft_file', type=str, default=None,
                         help='DFT settings file (dft.in)')
     
-    # Legacy mode (combined input file)
-    parser.add_argument('-f', '--input_file', type=str, default=None,
-                        help='Legacy combined input file (for backward compatibility)')
-    
     # Path arguments
-    parser.add_argument('-dp', '--datapath', type=str, default='data',
+    parser.add_argument('-dp', '--datapath', type=str, default='data_al',
                         help='Main path for data storage')
-    parser.add_argument('-rp', '--results_path', type=str, default='Results',
+    parser.add_argument('-rp', '--results_path', type=str, default='Results_al',
                         help='Path for results storage')
     
     # Override arguments (override config file values)
@@ -914,7 +924,7 @@ def generate_template_files(output_dir='.'):
     
     # Active Learning config
     al_config = ActiveLearningConfig()
-    al_config.to_file(os.path.join(output_dir, 'active_learning.in'))
+    al_config.to_file(os.path.join(output_dir, 'al.in'))
     
     # Scheduler config
     scheduler_config = SchedulerConfig()
@@ -929,7 +939,7 @@ def generate_template_files(output_dir='.'):
 # Generated template - modify as needed
 
 representation  = AA
-storing_path    = Results
+storing_path    = Results_al
 run             = 0
 runpath_attributes : run
 
@@ -1006,7 +1016,7 @@ rigid_style     = single
 extra_pair_coeff = {}
 not_optimize_force_for = []
 """
-    with open(os.path.join(output_dir, 'methodology.in'), 'w') as f:
+    with open(os.path.join(output_dir, 'training.in'), 'w') as f:
         f.write(methodology_template)
     
     # Potential template
@@ -1038,9 +1048,9 @@ alpha      : 2.0000000000000  1  0.00010  7.00000    0.00000
         f.write(potential_template)
     
     print(f"Generated template files in '{output_dir}':")
-    print("  - methodology.in")
+    print("  - training.in")
     print("  - potential.in")
-    print("  - active_learning.in")
+    print("  - al.in")
     print("  - scheduler.in")
     print("  - dft.in")
 
@@ -1065,7 +1075,7 @@ def main():
         potential_file = None
     else:
         print("Error: Must provide either:")
-        print("  - Both -m (methodology.in) and -p (potential.in) for modular mode")
+        print("  - Both -m (training.in) and -p (potential.in) for modular mode")
         print("  - Or -f (combined.in) for legacy mode")
         print("\nUse --generate-templates to create template input files.")
         return
