@@ -388,8 +388,14 @@ class ActiveLearningPipeline:
             sampling_method = self._get_sampling_method(iteration)
             print(f"Sampling method: {sampling_method}")
             
+            # Read data
+            data = self.read_data(iteration)
+            
+            # Clean data
+            data = self.clean_data(data)
+            
             # Step A: Training
-            data = self.train(iteration)
+            self.train(iteration, data)
             
             # Step B: Sampling (if not using existing data)
             if iteration >= self.existing_data:
@@ -420,9 +426,9 @@ class ActiveLearningPipeline:
         """Determine sampling method based on iteration number."""
         return self.al_config.get_sampling_method(iteration)
     
-    def train(self, iteration):
+    def read_data(self, iteration):
         """
-        Step A: Train the model on accumulated data.
+        Read data for the current iteration.
         
         Parameters
         ----------
@@ -432,11 +438,9 @@ class ActiveLearningPipeline:
         Returns
         -------
         data : pd.DataFrame
-            Training data.
-        model_costs : dict
-            Model costs/errors from training.
+            Raw training data.
         """
-        print("\n--- STEP A: TRAINING ---")
+        print("\n--- READING DATA ---")
         t0 = perf_counter()
         
         # Convert log files to ffdata format
@@ -456,10 +460,46 @@ class ActiveLearningPipeline:
         
         self._print_column_stats(data['Energy'])
         
-        # Clean data
+        print(f'Data reading time = {perf_counter() - t0:.3e} sec')
+        return data
+    
+    def clean_data(self, data):
+        """
+        Clean the training data.
+        
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Raw training data.
+            
+        Returns
+        -------
+        data : pd.DataFrame
+            Cleaned training data.
+        """
+        print("\n--- CLEANING DATA ---")
+        t0 = perf_counter()
+        
         data = self.al.clean_data(data, self.setup, self.beta_sampling)
         print('After cleaning:')
         self._print_column_stats(data['Energy'])
+        
+        print(f'Data cleaning time = {perf_counter() - t0:.3e} sec')
+        return data
+    
+    def train(self, iteration, data):
+        """
+        Step A: Train the model on accumulated data.
+        
+        Parameters
+        ----------
+        iteration : int
+            Current iteration number.
+        data : pd.DataFrame
+            Cleaned training data.
+        """
+        print("\n--- STEP A: TRAINING ---")
+        t0 = perf_counter()
         
         # Distribution plot
         ff.Data_Manager(data, self.setup).distribution('Energy')
@@ -475,7 +515,6 @@ class ActiveLearningPipeline:
         self.al.write_errors(model_costs, iteration)
         
         print(f'Total training step time = {perf_counter() - t0:.3e} sec')
-        return data
     
     def sample(self, iteration, data, sampling_method):
         """
