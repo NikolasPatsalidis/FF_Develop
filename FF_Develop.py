@@ -1880,26 +1880,40 @@ class al_help():
         numpy.ndarray
             Perturbed coordinates.
         """
+        n = len(old_data_coords)
+        trans_at_p = np.random.uniform (0, 1.0, n)
+        trans_wh_p = np.random.uniform (0, 1.0, n)
+        rot_wh_p = np.random.uniform (0, 1.0, n)
+        
         # vectorize the coords
         to_config_low_index = []
         to_config_up_index = []
         vec_coords = [ ]
         ntot = 0
-        idx_move = []
-        choose_from = [j for j, at in enumerate(at_types) if at not in fixed_types ]
-        for j,c in enumerate(old_data_coords):
+        for c in old_data_coords:
             na = len(c)
             to_config_low_index.append(ntot)
             to_config_up_index.append(ntot + na)
             vec_coords.extend(c)
 
-            idx = np.random.choice(choose_from)
-            idx_move.append(idx +ntot)
             ntot+=na
 
         vec_coords = np.array(vec_coords)
         to_config_low_index =  np.array(to_config_low_index)
         to_config_up_index =  np.array(to_config_up_index)
+        
+        # select indexes to translate
+        idx_move = []
+        choose_from = [j for j, at in enumerate(at_types) if at not in fixed_types ]
+        
+        ntot= 0
+        for j,c in enumerate(old_data_coords,prob_to_act):
+            na = len(c)
+            if trans_at_p[j] < translate_atoms:
+                idx = np.random.choice(choose_from)
+                idx_move.append(idx +ntot)
+
+            ntot+=na
         idx_move = np.array(idx_move)
 
         #assert  vec_coords.shape == (ntot, 3) , 'shape of vec_coords is wrong '
