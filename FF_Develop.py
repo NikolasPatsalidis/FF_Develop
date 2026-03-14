@@ -620,9 +620,8 @@ class al_help():
         number_of_data_per_step = al_config.number_of_data_per_step   
         asymptotic_steps = al_config.mc_asymptotic_steps
         fixed_types = al_config.fixed_types
-        p1, p2, p3 = al_config.translate_atoms, al_config.translate_whole, al_config.rotate_whole
-        s = p1 + p2 +p3 
-        translate_atoms, translate_whole, rotate_whole = p1/s , p2/s, p3/s 
+        pta, ptwh, prwh = al_config.translate_atoms, al_config.translate_whole, al_config.rotate_whole
+
 
         print(f'prob to deform = {translate_atoms:4.3f}, prob to trans = {translate_whole:4.3f} , prob to rot = {rotate_whole:4.3f}')
 
@@ -680,8 +679,8 @@ class al_help():
             while(step <= max_mc_steps and c_size <= max_candidates_per_system):
             
                 old_coords = copy.deepcopy(step_data['coords'].to_numpy().copy())
-                all_new_coords = al_help.random_walk_vectorized(old_coords, sigma, at_types, fixed_types,
-                                                                translate_atoms, translate_whole, rotate_whole)
+                all_new_coords = al_help.random_walk_multiple(old_coords, sigma, at_types, fixed_types,
+                                                                pta, ptwh, prwh)
                 step_data.loc[step_data.index,'coords'] = all_new_coords
                  
                 al_help.evaluate_potential(step_data, setup,'opt')
@@ -1904,13 +1903,13 @@ class al_help():
         
         # select indexes to translate
         idx_move = []
-        choose_from = [j for j, at in enumerate(at_types) if at not in fixed_types ]
+        not_fixed = [j for j, at in enumerate(at_types) if at not in fixed_types ]
         
         ntot= 0
         for j,c in enumerate(old_data_coords,prob_to_act):
             na = len(c)
             if trans_at_p[j] < translate_atoms:
-                idx = np.random.choice(choose_from)
+                idx = np.random.choice(not_fixed)
                 idx_move.append(idx +ntot)
 
             ntot+=na
@@ -1973,6 +1972,108 @@ class al_help():
         cc = GeometryTransformations.rotate_coordinates(cc,*rrot)
         cc +=  rtrans
         return cc
+
+    @staticmethod
+    def rotate_around_centroid(coords, angles):
+        """Rotate coordinates around their centroid.
+        
+        Parameters
+        ----------
+        coords : numpy.ndarray
+            Nx3 array of atomic coordinates to rotate.
+        angles : tuple or array-like
+            (angle_x, angle_y, angle_z) rotation angles in radians.
+            
+        Returns
+        -------
+        numpy.ndarray
+            Rotated coordinates.
+        """
+        centroid = coords.mean(axis=0)
+        centered = coords - centroid
+        rotated = GeometryTransformations.rotate_coordinates(centered, *angles)
+        return rotated + centroid
+    
+    @staticmethod
+    def random_rotation_angles(sigma):
+        """Generate random rotation angles based on sigma.
+        
+        Parameters
+        ----------
+        sigma : float
+            Standard deviation for angle generation. Angles are 2*sigma in magnitude.
+            
+        Returns
+        -------
+        numpy.ndarray
+            Array of 3 rotation angles (x, y, z) in radians.
+        """
+        return np.random.normal(0, 2 * sigma, 3)
+    
+    @staticmethod
+    def random_walk_multiple(coords, sigma, at_types, fixed_types=[],
+                             p_translate_atoms=1.0, p_translate_whole=0.0, p_rotate_whole=0.0):
+        """Apply random perturbation to coordinates based on move type probabilities.
+        
+        Randomly selects one of three operations based on probabilities:
+        - translate_atoms: translate a single random atom from not_fixed
+        - translate_whole: translate all not_fixed atoms by same random vector
+        - rotate_whole: rotate all not_fixed atoms around their centroid
+        
+        Parameters
+        ----------
+        coords : numpy.ndarray
+            Nconfig,[Nx3] object of atomic coordinates.
+        sigma : float
+            Standard deviation for translations. Rotation angles use 2*sigma.
+        at_types : list
+            List of atom types for each atom.
+        fixed_types : list
+            Atom types that should not be moved.
+        p_translate_atoms : float
+            Probability of translating a single atom (default 0.2).
+        p_translate_whole : float
+            Probability of translating all movable atoms (default 0.3).
+        p_rotate_whole : float
+            Probability of rotating all movable atoms (default 0.5).
+            
+        Returns
+        -------
+        numpy.ndarray
+            New coordinates after perturbation.
+        """
+    
+        # Get indices of atoms that can move
+        not_fixed = np.array([j for j, at in enumerate(at_types) if at not in fixed_types])
+        
+        if len(not_fixed) == 0:
+            return coords.copy()
+
+        nconfig = len(coords)    
+        new_coords = deepcopy.copy(coords)
+        
+        # Choose operation based on probabilities
+        ta  = np.random.uniform(0.0, 1.0, nconfig) < p_translate_atoms
+        twh = np.random.uniform(0.0, 1.0, nconfig) < p_translate_whole
+        rwh = np.random.uniform(0.0, 1.0, nconfig) < p_rotate_whole
+        for j, c in enumerate(new_coords):
+            if ta[j]:
+                # Translate a single random atom
+                idx = np.random.choice(not_fixed)
+                displacement = np.random.normal(0, sigma, 3)
+                c[idx] += displacement
+            
+            if twh[j]:
+                # Translate all not fixed
+                displacement = np.random.normal(0, sigma, 3)
+                c[not_fixed,:] += displacement
+            if rwh[j]:
+                angles = al_help.random_rotation_angles(sigma)
+                movable_coords = c[not_fixed]
+                rotated = al_help.rotate_around_centroid(movable_coords, angles)
+                c[not_fixed, :] = rotated
+
+        return new_coords
 
     @staticmethod
     def similarity_vector(dval):
