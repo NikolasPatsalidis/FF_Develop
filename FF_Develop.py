@@ -7516,7 +7516,6 @@ class FF_Optimizer(Optimizer):
         if model_info.category == 'PW' or model_info.category == 'BO':
             pw_i = dudx_vectorized*model_info.partial_ri
             FF_Optimizer.numba_add_ij(Forces, pw_i, i_index, j_index)
-            print(model_info.category)
             
         elif model_info.category == 'LD':
             pw_i = dudx_vectorized[ model_info.to_ij ]*model_info.v_ij
