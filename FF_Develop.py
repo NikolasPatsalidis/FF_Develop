@@ -618,6 +618,13 @@ class al_help():
         max_mc_steps = al_config.max_mc_steps
         max_candidates_per_system = al_config.max_candidates_per_system
         number_of_data_per_step = al_config.number_of_data_per_step   
+        asymptotic_steps = al_config.mc_asymptotic_steps
+        fixed_types = al_config.fixed_types
+        p1, p2, p3 = al_config.translate_atoms, al_config.translate_whole, al_config.rotate_whole
+        s = p1 + p2 +p3 
+        translate_atoms, translate_whole, rotate_whole = p1/s , p2/s, p3/s 
+
+        print(f'prob to deform = {translate_atoms:4.3f}, prob to trans = {translate_whole:4.3f} , prob to rot = {rotate_whole:4.3f}')
 
         kB = 0.0019872037514523
         
@@ -630,7 +637,6 @@ class al_help():
         init_data['coords'] = c
         systems = np.unique(init_data['sys_name'])
         
-        asymptotic_steps = 1
         candidate_data = pd.DataFrame()
         
         for sysname in systems:
@@ -673,12 +679,9 @@ class al_help():
 
             while(step <= max_mc_steps and c_size <= max_candidates_per_system):
             
-                all_new_coords = []
                 old_coords = copy.deepcopy(step_data['coords'].to_numpy().copy())
-                all_new_coords = al_help.random_walk_vectorized(old_coords, sigma, at_types, al_config.fixed_types)
-                #for j,dat in step_data.iterrows():
-                #    new_coords = al_help.petrube_coords(np.array(dat['coords']) ,sigma, 'random_walk', dat['bodies'],)
-                #    all_new_coords.append(new_coords)
+                all_new_coords = al_help.random_walk_vectorized(old_coords, sigma, at_types, fixed_types,
+                                                                translate_atoms, translate_whole, rotate_whole)
                 step_data.loc[step_data.index,'coords'] = all_new_coords
                  
                 al_help.evaluate_potential(step_data, setup,'opt')
@@ -1863,7 +1866,8 @@ class al_help():
         return candidate_data
     
     @staticmethod
-    def random_walk_vectorized(old_data_coords, sigma, at_types, fixed_types=[]):
+    def random_walk_vectorized(old_data_coords, sigma, at_types, fixed_types=[],
+                                translate_atoms=1.0, translate_whole=0.0, rotate_whole=0.0):
         """Apply random perturbations to atomic coordinates.
 
         Parameters

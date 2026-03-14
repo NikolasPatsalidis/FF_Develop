@@ -129,6 +129,7 @@ class ActiveLearningConfig(ConfigBase):
         'translate_atoms': 0.2,               # probability to translate single atom
         'rotate_whole': 0.5,                  # probability to rotate whole choose_from set
         'translate_whole': 0.3,               # probability to translate whole choose_from set
+        'mc_asymptotic_steps':0,              # number of mc steps to skip sampling
     }
     
     def __init__(self):
