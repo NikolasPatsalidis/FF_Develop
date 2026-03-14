@@ -71,16 +71,18 @@ class ConfigBase:
             if '=' in line:
                 key, value = line.split('=', 1)
                 key = key.strip()
+                if key not in cls.defaults:
+                    raise Exception(f"Unknown config option '{key}' in {filepath}. Valid options: {list(cls.defaults.keys())}")
                 value = cls._parse_value(value)
-                if hasattr(config, key):
-                    setattr(config, key, value)
+                setattr(config, key, value)
                 print(key, value)
             elif ':' in line:
                 key, values_str = line.split(':', 1)
                 key = key.strip()
+                if key not in cls.defaults:
+                    raise Exception(f"Unknown config option '{key}' in {filepath}. Valid options: {list(cls.defaults.keys())}")
                 values = [cls._parse_value(v) for v in values_str.split()]
-                if hasattr(config, key):
-                    setattr(config, key, values)
+                setattr(config, key, values)
                 print(key, values)
         return config
     
@@ -110,16 +112,23 @@ class ActiveLearningConfig(ConfigBase):
     defaults = {
         'n_iterations': 20,
         'batch_size': 100,
-        'sigma': 0.02,
+        'sigma_init': 0.02,                   # initial sigma for perturbation/MC
         'start_iteration': 0,
         'existing_data': -1,
         'target_temperature': 500.0,
-        'sampling_method_schedule': 'auto',  # 'auto', 'perturbation', 'mc', 'md'
-        'perturbation_iterations': 0,        # iterations 0 to this use perturbation
-        'mc_iterations': 9,                  # iterations up to this use MC
+        'sampling_method_schedule': 'auto',   # 'auto', 'perturbation', 'mc', 'md'
+        'perturbation_iterations': 0,         # iterations 0 to this use perturbation
+        'mc_iterations': 9,                   # iterations up to this use MC
         'fixed_types': [],
         'charge_map': '',
         'mass_map': '',
+        # MC sampling parameters
+        'max_mc_steps': 4000,                # maximum MC steps per system
+        'max_candidates_per_system': 10000,   # maximum candidate configs per system
+        'number_of_data_per_step': 100,      # data points to collect per step
+        'translate_atoms': 0.2,               # probability to translate single atom
+        'rotate_whole': 0.5,                  # probability to rotate whole choose_from set
+        'translate_whole': 0.3,               # probability to translate whole choose_from set
     }
     
     def __init__(self):
@@ -607,9 +616,8 @@ class ActiveLearningPipeline:
             )
         elif sampling_method == 'mc':
             candidate_data, self.beta_sampling = self.al.MC_sample(
-                data, self.setup, self.sigma, self.beta_sampling, 
-                self.al_config.fixed_types
-            )
+                data, self.setup, al_config )
+            
         else:
             raise NotImplementedError(f'Sampling method "{sampling_method}" is unknown')
         

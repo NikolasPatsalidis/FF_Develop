@@ -593,7 +593,7 @@ class al_help():
         return new_beta_sampling
 
     @staticmethod
-    def MC_sample(data, setup, sigma, beta_sampling, fixed_types = []):
+    def MC_sample(data, setup, al_config):
         """Sample candidate configurations via Metropolis-Hastings Monte Carlo.
 
         Parameters
@@ -615,13 +615,13 @@ class al_help():
             `(candidate_data, beta_sampling)` - sampled candidates and beta.
         """
         
-        max_mc_steps = 40000
-        max_candidates_per_system = 40000
-        number_of_data_per_step = 1000   
+        max_mc_steps = al_config.max_mc_steps
+        max_candidates_per_system = al_config.max_candidates_per_system
+        number_of_data_per_step = al_config.number_of_data_per_step   
 
         kB = 0.0019872037514523
         
-        sigma_init = sigma
+        sigma_init = al_config.sigma_init
         
         c = copy.deepcopy(data['coords'].to_numpy())
         
@@ -674,7 +674,7 @@ class al_help():
             
                 all_new_coords = []
                 old_coords = copy.deepcopy(step_data['coords'].to_numpy().copy())
-                all_new_coords = al_help.random_walk_vectorized(old_coords, sigma, at_types, fixed_types)
+                all_new_coords = al_help.random_walk_vectorized(old_coords, sigma, at_types, al_config.fixed_types)
                 #for j,dat in step_data.iterrows():
                 #    new_coords = al_help.petrube_coords(np.array(dat['coords']) ,sigma, 'random_walk', dat['bodies'],)
                 #    all_new_coords.append(new_coords)
