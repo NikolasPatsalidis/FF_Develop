@@ -677,28 +677,35 @@ class al_help():
             candidate_data_sys = pd.DataFrame()
 
             while(step <= max_mc_steps and c_size <= max_candidates_per_system):
-            
+                # get new corods via random walk
                 old_coords = copy.deepcopy(step_data['coords'].to_numpy().copy())
                 all_new_coords = al_help.random_walk_multiple(old_coords, sigma, at_types, fixed_types,
                                                                 pta, ptwh, prwh)
+                # set all new coords
                 step_data.loc[step_data.index,'coords'] = all_new_coords
-                 
+                
+                # evaluate potential
                 al_help.evaluate_potential(step_data, setup,'opt')
                  
                 Uclass_new = step_data['Uclass'].to_numpy()
                 
+                # accept_prop
                 dubt = (Uclass_new  - Uclass_prev )*beta_sampling
                  
                 pe =  np.exp( - dubt ) 
+                
+                # accept or reject
                 accepted_filter = pe > np.random.uniform(0,1,n) 
-            
-             
                 not_accepted_filter = np.logical_not(accepted_filter)
+                
+                # set rejected to step_data
                 step_data.loc[ not_accepted_filter, 'coords']  = old_coords[not_accepted_filter]
-                 
+                
+                # set to previous
                 Uclass_prev [ accepted_filter ] = Uclass_new [accepted_filter].copy()
                 Uclass_prev [ not_accepted_filter ] =  Uclass_prev [ not_accepted_filter].copy()
                 
+                # acceptance ratio
                 current_accept_ratio = np.count_nonzero(accepted_filter)/n
                 sum_accept_ratio += current_accept_ratio
             
@@ -707,7 +714,8 @@ class al_help():
                     sys.stdout.flush()
             
                 step += 1
-                
+
+                # autotune accept ratio
                 if step < asymptotic_steps:
                     continue
                 AR = sum_accept_ratio/step
@@ -717,9 +725,10 @@ class al_help():
                      sigma/=0.99
                 sigma  = min( max(sigma,sigma_init*1e-1) , sigma_init*1e1)
                 
-                filtered_step_data = step_data[ accepted_filter ]
+                # append the accepted step_data
+                accepted_step_data = step_data[ accepted_filter ]
                 
-                candidate_data_sys = pd.concat( (candidate_data_sys, filtered_step_data), ignore_index=True)
+                candidate_data_sys = pd.concat( (candidate_data_sys, accepted_step_data), ignore_index=True)
                 
                 c_size = len(candidate_data_sys)
                 ########
@@ -2064,7 +2073,6 @@ class al_help():
                 idx = np.random.choice(not_fixed)
                 displacement = np.random.normal(0, sigma, 3)
                 c[idx] += displacement
-            
             if twh[j]:
                 # Translate all not fixed
                 displacement = np.random.normal(0, sigma, 3)
