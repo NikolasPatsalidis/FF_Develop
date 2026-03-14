@@ -623,7 +623,7 @@ class al_help():
         pta, ptwh, prwh = al_config.translate_atoms, al_config.translate_whole, al_config.rotate_whole
 
 
-        print(f'prob to deform = {translate_atoms:4.3f}, prob to trans = {translate_whole:4.3f} , prob to rot = {rotate_whole:4.3f}')
+        print(f'prob to deform = {pta:4.3f}, prob to trans = {ptwh:4.3f} , prob to rot = {prwh:4.3f}')
 
         kB = 0.0019872037514523
         
@@ -2011,7 +2011,7 @@ class al_help():
         return np.random.normal(0, 2 * sigma, 3)
     
     @staticmethod
-    def random_walk_multiple(coords, sigma, at_types, fixed_types=[],
+    def random_walk_multiple(old_coords, sigma, at_types, fixed_types=[],
                              p_translate_atoms=1.0, p_translate_whole=0.0, p_rotate_whole=0.0):
         """Apply random perturbation to coordinates based on move type probabilities.
         
@@ -2022,7 +2022,7 @@ class al_help():
         
         Parameters
         ----------
-        coords : numpy.ndarray
+        old_coords : numpy.ndarray
             Nconfig,[Nx3] object of atomic coordinates.
         sigma : float
             Standard deviation for translations. Rotation angles use 2*sigma.
@@ -2044,19 +2044,21 @@ class al_help():
         """
     
         # Get indices of atoms that can move
-        not_fixed = np.array([j for j, at in enumerate(at_types) if at not in fixed_types])
+        not_fixed = np.array([j for j, at in enumerate(at_types) if at not in fixed_types], dtype=np.int64)
         
         if len(not_fixed) == 0:
-            return coords.copy()
+            return old_coords.copy()
 
-        nconfig = len(coords)    
-        new_coords = deepcopy.copy(coords)
+        nconfig = len(old_coords)    
+        old_coords = copy.deepcopy(old_coords)
         
         # Choose operation based on probabilities
         ta  = np.random.uniform(0.0, 1.0, nconfig) < p_translate_atoms
         twh = np.random.uniform(0.0, 1.0, nconfig) < p_translate_whole
         rwh = np.random.uniform(0.0, 1.0, nconfig) < p_rotate_whole
-        for j, c in enumerate(new_coords):
+        new_coords = [ ]
+        for j, coords in enumerate(old_coords):
+            c = np.array(coords)
             if ta[j]:
                 # Translate a single random atom
                 idx = np.random.choice(not_fixed)
@@ -2069,10 +2071,10 @@ class al_help():
                 c[not_fixed,:] += displacement
             if rwh[j]:
                 angles = al_help.random_rotation_angles(sigma)
-                movable_coords = c[not_fixed]
+                movable_coords = c[not_fixed,:]
                 rotated = al_help.rotate_around_centroid(movable_coords, angles)
                 c[not_fixed, :] = rotated
-
+            new_coords.append(list(c))
         return new_coords
 
     @staticmethod
