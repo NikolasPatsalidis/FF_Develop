@@ -362,7 +362,6 @@ class ActiveLearningPipeline:
         # Extract commonly used parameters
         self.n_iterations = self.al_config.n_iterations
         self.batch_size = self.al_config.batch_size
-        self.sigma = self.al_config.sigma
         self.existing_data = self.al_config.existing_data
         
         # Sampling parameters
@@ -596,17 +595,6 @@ class ActiveLearningPipeline:
         print("\n--- STEP B: SAMPLING ---")
         t0 = perf_counter()
         
-        # Create args namespace for sampling functions
-        class SamplingArgs:
-            pass
-        
-        args = SamplingArgs()
-        args.num = iteration
-        args.sigma = self.sigma
-        #args.charge_map = self._parse_map_string(self.config.get('charge_map_str', ''))
-        #args.mass_map = self._parse_map_string(self.config.get('mass_map_str', ''))
-        #args.writing_path = 'lammps_working'
-        
         # Generate candidates based on method
         if sampling_method == 'perturbation':
             candidate_data = self.al.make_random_petrubations(data, sigma=self.sigma)
@@ -615,8 +603,7 @@ class ActiveLearningPipeline:
                 data, self.setup, args, self.beta_sampling
             )
         elif sampling_method == 'mc':
-            candidate_data, self.beta_sampling = self.al.MC_sample(
-                data, self.setup, al_config )
+            candidate_data  = self.al.MC_sample( data, self.setup, self.al_config )
             
         else:
             raise NotImplementedError(f'Sampling method "{sampling_method}" is unknown')

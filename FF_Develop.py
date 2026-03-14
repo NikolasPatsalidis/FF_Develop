@@ -622,7 +622,8 @@ class al_help():
         kB = 0.0019872037514523
         
         sigma_init = al_config.sigma_init
-        
+        beta_sampling = 1.0/(kB*al_config.target_temperature)
+
         c = copy.deepcopy(data['coords'].to_numpy())
         
         init_data = copy.deepcopy(data[['at_type','sys_name','natoms','coords', 'bodies']])
@@ -722,25 +723,15 @@ class al_help():
                 ########
 
 
-            print('Metropolis Hastings completed! Average acceptance {:5.4f}'.format( AR ) ) 
+            print(f'Metropolis Hastings for {sysname} completed! Average acceptance {AR:5.4f}' ) 
 
-            u = candidate_data_sys['Uclass'].to_numpy()
-
-            tfit, beta_eff, alpha, weights, l_minima, fail = al_help.estimate_Teff_Beff(u,  nbins = 200) 
-            
-            print('Candidate distribution MC:    beta_eff = {:5.4f}  ,  beta_sampling = {:5.4f}'.format ( beta_eff, beta_sampling) )
-            
-            al_help.plot_candidate_distribution(u - u.min(), (beta_eff, alpha, weights, l_minima), 200,
-                        title = f'MC trial' + r': Candidate distribution $\beta_{eff}$' + ' = {:5.4f}'.format( beta_eff) + r' $\beta_{sampling}$' + ' = {:5.4f}'.format( beta_sampling),
-                        fname=f'{setup.runpath}/CD_{sysname}.png')
-            
             
             candidate_data = candidate_data.append(candidate_data_sys,ignore_index=True)
 
         print('Metropolis Hastings completed! Average acceptance {:5.4f}'.format( c_size/(n*(step) ) ) )
         
         #raise  Exception('Debuging. Want to stop here')
-        return candidate_data , beta_sampling
+        return candidate_data 
 
     @staticmethod
     def plot_candidate_distribution(u, fitting_params, bins, title = '', fname=None):
