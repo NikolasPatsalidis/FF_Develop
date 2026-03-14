@@ -54,7 +54,7 @@ class ConfigBase:
     def from_file(cls, filepath):
         """Read configuration from file."""
         config = cls()
-        
+        print(filepath)
         if not os.path.exists(filepath):
             print(f"Warning: Config file {filepath} not found, using defaults")
             return config
@@ -74,13 +74,14 @@ class ConfigBase:
                 value = cls._parse_value(value)
                 if hasattr(config, key):
                     setattr(config, key, value)
+                print(key, value)
             elif ':' in line:
                 key, values_str = line.split(':', 1)
                 key = key.strip()
                 values = [cls._parse_value(v) for v in values_str.split()]
                 if hasattr(config, key):
                     setattr(config, key, values)
-        
+                print(key, values)
         return config
     
     def to_file(self, filepath):
@@ -114,8 +115,9 @@ class ActiveLearningConfig(ConfigBase):
         'existing_data': -1,
         'target_temperature': 500.0,
         'sampling_method_schedule': 'auto',  # 'auto', 'perturbation', 'mc', 'md'
-        'perturbation_iterations': 1,        # iterations 0 to this use perturbation
+        'perturbation_iterations': 0,        # iterations 0 to this use perturbation
         'mc_iterations': 9,                  # iterations up to this use MC
+        'fixed_types': [],
         'charge_map': '',
         'mass_map': '',
     }
@@ -402,10 +404,6 @@ class ActiveLearningPipeline:
             
             t_iter_start = perf_counter()
             
-            # Determine sampling method based on iteration
-            sampling_method = self._get_sampling_method(iteration)
-            print(f"Sampling method: {sampling_method}")
-            
             # Read data
             data = self.read_data(iteration)
             
@@ -417,6 +415,11 @@ class ActiveLearningPipeline:
             
             # Step B: Sampling (if not using existing data)
             if iteration >= self.existing_data:
+            
+                # Determine sampling method based on iteration
+                sampling_method = self._get_sampling_method(iteration)
+                print(f"Sampling method: {sampling_method}")
+                
                 selected_data = self.sample(iteration, data, sampling_method)
                 
                 # Step C: Prepare and run DFT (placeholder)
@@ -553,7 +556,7 @@ class ActiveLearningPipeline:
         
         # Solve model
         t1 = perf_counter()
-        self.setup, optimizer = self.al.solve_model(data, self.setup)
+        data, optimizer = self.al.solve_model(data, self.setup)
         print(f'Training time = {perf_counter() - t1:.3e} sec')
         sys.stdout.flush()
         
@@ -561,7 +564,8 @@ class ActiveLearningPipeline:
         self.al.write_errors(optimizer.current_costs, iteration)
         
         print(f'Total training step time = {perf_counter() - t0:.3e} sec')
-    
+        return 
+
     def sample(self, iteration, data, sampling_method):
         """
         Step B: Sample candidate configurations.
@@ -590,9 +594,9 @@ class ActiveLearningPipeline:
         args = SamplingArgs()
         args.num = iteration
         args.sigma = self.sigma
-        args.charge_map = self._parse_map_string(self.config.get('charge_map_str', ''))
-        args.mass_map = self._parse_map_string(self.config.get('mass_map_str', ''))
-        args.writing_path = 'lammps_working'
+        #args.charge_map = self._parse_map_string(self.config.get('charge_map_str', ''))
+        #args.mass_map = self._parse_map_string(self.config.get('mass_map_str', ''))
+        #args.writing_path = 'lammps_working'
         
         # Generate candidates based on method
         if sampling_method == 'perturbation':
@@ -603,20 +607,14 @@ class ActiveLearningPipeline:
             )
         elif sampling_method == 'mc':
             candidate_data, self.beta_sampling = self.al.MC_sample(
-                data, self.setup, args, self.beta_sampling
+                data, self.setup, self.sigma, self.beta_sampling, 
+                self.al_config.fixed_types
             )
         else:
             raise NotImplementedError(f'Sampling method "{sampling_method}" is unknown')
         
-        # Save beta_sampling
-        with open('beta_sampling_value', 'w') as f:
-            f.write(f'{self.beta_sampling}')
         
-        tsamp = 1 / (self.kB * self.beta_sampling)
-        print(f'AL iteration {iteration}: beta_sampling = {self.beta_sampling:.4f}, '
-              f'Tsample = {tsamp:.2f} K')
-        
-        print(f'Candidate sampling time = {perf_counter() - t0:.3e} sec')
+        print(f'Candidate sampling time = {perf_counter() - t0:.3e} sec , number of candidate data = {len(candidate_data)}')
         
         # Select configurations
         t1 = perf_counter()
@@ -1101,14 +1099,9 @@ def main():
         # Modular mode
         methodology_file = args.methodology_file
         potential_file = args.potential_file
-    elif args.input_file:
-        # Legacy mode: single combined file
-        methodology_file = args.input_file
-        potential_file = None
     else:
-        print("Error: Must provide either:")
+        print("Error: Must provide: ")
         print("  - Both -m (training.in) and -p (potential.in) for modular mode")
-        print("  - Or -f (combined.in) for legacy mode")
         print("\nUse --generate-templates to create template input files.")
         return
     

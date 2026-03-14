@@ -593,7 +593,7 @@ class al_help():
         return new_beta_sampling
 
     @staticmethod
-    def MC_sample(data, setup, parsed_args, beta_sampling):
+    def MC_sample(data, setup, sigma, beta_sampling, fixed_types = []):
         """Sample candidate configurations via Metropolis-Hastings Monte Carlo.
 
         Parameters
@@ -606,6 +606,8 @@ class al_help():
             Command-line arguments with `sigma` for perturbation.
         beta_sampling : float
             Inverse temperature for acceptance probability.
+        fixed_types : list
+            atom types that need to be fixed
 
         Returns
         -------
@@ -615,10 +617,11 @@ class al_help():
         
         max_mc_steps = 40000
         max_candidates_per_system = 40000
-        
+        number_of_data_per_step = 1000   
+
         kB = 0.0019872037514523
         
-        sigma_init = parsed_args.sigma
+        sigma_init = sigma
         
         c = copy.deepcopy(data['coords'].to_numpy())
         
@@ -626,54 +629,62 @@ class al_help():
         init_data['coords'] = c
         systems = np.unique(init_data['sys_name'])
         
-        asymptotic_steps = 100
+        asymptotic_steps = 1
         candidate_data = pd.DataFrame()
         
         for sysname in systems:
             
+            # get all the data for this system
+
             sys_data = init_data [ init_data['sys_name'] == sysname]
             
+            # get a copy of all the system data 
             step_data = copy.deepcopy(sys_data)
             
+            # evaluate the potential
             al_help.evaluate_potential(step_data, setup,'opt')
             Uclass = step_data['Uclass'].to_numpy().copy()
             
-            bs = setup.bS
-
+            # select based on propability initial configurations to initiate the MC moves
             prop_sel = np.exp( - (Uclass - Uclass.min())*beta_sampling )
             prop_sel /= prop_sel.sum()
 
             all_indexes = np.array(step_data.index)
             try:
-                idx_chosen = np.random.choice(all_indexes, size= min(len(step_data),100) , replace=False, p = prop_sel)
+                idx_chosen = np.random.choice(all_indexes, size= min(len(step_data) , number_of_data_per_step) , replace=False, p = prop_sel)
             except ValueError:
-                idx_chosen = np.random.choice(all_indexes, size= min(len(step_data),100) , replace=False, p = None)
+                idx_chosen = np.random.choice(all_indexes, size= min(len(step_data) , number_of_data_per_step) , replace=False, p = None)
             
+            # select a subset of initial data (number_of_data_per_step)
             step_data = step_data.loc[idx_chosen]
-
+            
+            # evaluate previouss step
             al_help.evaluate_potential(step_data, setup,'opt')
             Uclass_prev = step_data['Uclass'].to_numpy().copy()
             
             n = len(step_data)
+            print(f'Number of initial data = {n}') 
+            # initialize mc parameters
+            step, c_size ,  sigma, sum_accept_ratio, AR = 0, 0 , sigma_init, 0.0, 0.0
+            at_types = step_data['at_type'].iloc[0]
             
-            step, c_size ,  sigma, avg_accept_ratio, AR = 0, 0 , sigma_init, 0.0, 0.0
             candidate_data_sys = pd.DataFrame()
-            
+
             while(step <= max_mc_steps and c_size <= max_candidates_per_system):
             
                 all_new_coords = []
-                old_coords = copy.deepcopy(step_data['coords'].to_numpy())
-                for j,dat in step_data.iterrows():
-                    new_coords = al_help.petrube_coords(np.array(dat['coords']) ,sigma, 'random_walk', dat['bodies'])
-                    all_new_coords.append(new_coords)
+                old_coords = copy.deepcopy(step_data['coords'].to_numpy().copy())
+                all_new_coords = al_help.random_walk_vectorized(old_coords, sigma, at_types, fixed_types)
+                #for j,dat in step_data.iterrows():
+                #    new_coords = al_help.petrube_coords(np.array(dat['coords']) ,sigma, 'random_walk', dat['bodies'],)
+                #    all_new_coords.append(new_coords)
                 step_data.loc[step_data.index,'coords'] = all_new_coords
                  
                 al_help.evaluate_potential(step_data, setup,'opt')
                  
                 Uclass_new = step_data['Uclass'].to_numpy()
                 
-                beta_anneal = max( beta_sampling, max_candidates_per_system/(2*(c_size+n)) * beta_sampling )
-                dubt = (Uclass_new  - Uclass_prev )*beta_anneal
+                dubt = (Uclass_new  - Uclass_prev )*beta_sampling
                  
                 pe =  np.exp( - dubt ) 
                 accepted_filter = pe > np.random.uniform(0,1,n) 
@@ -685,19 +696,18 @@ class al_help():
                 Uclass_prev [ accepted_filter ] = Uclass_new [accepted_filter].copy()
                 Uclass_prev [ not_accepted_filter ] =  Uclass_prev [ not_accepted_filter].copy()
                 
-                accept_ratio = np.count_nonzero(accepted_filter)/n
-                avg_accept_ratio += accept_ratio
+                current_accept_ratio = np.count_nonzero(accepted_filter)/n
+                sum_accept_ratio += current_accept_ratio
             
-
-                if step %200  ==0:
-                    print( 'MC step {:d}, beta_anneal = {:.4e} ,   sigma = {:.4e} A ,  accept_ratio = {:5.4f}  ,  current_accept = {:5.4f} candidate size = {:d}'.format(step, beta_anneal,  sigma, AR, accept_ratio, c_size) )
+                if step %1  ==0:
+                    print( f'MC step {step:d}, beta_sampling = {beta_sampling:.4e} ,   sigma = {sigma:.4e} A ,  accept_ratio = {AR:5.4f}  ,  current_accept = {current_accept_ratio:5.4f} candidate size = {c_size:d}' )
                     sys.stdout.flush()
             
                 step += 1
                 
                 if step < asymptotic_steps:
                     continue
-                AR = avg_accept_ratio/step
+                AR = sum_accept_ratio/step
                 if AR < 0.2:
                      sigma*=0.99
                 elif AR > 0.5:
@@ -1096,7 +1106,7 @@ class al_help():
         return
     
     @staticmethod
-    def evaluate_potential(data,setup, which='init'):
+    def evaluate_potential(data, setup, which='init'):
         """Evaluate the current force-field model on a dataset without optimization.
 
         Parameters
@@ -1113,7 +1123,7 @@ class al_help():
         FF_Optimizer
             Optimizer instance with predictions computed.
         """
-        al_help.make_interactions(data,setup)
+        al_help.make_interactions(data, setup)
         
         
         #train_indexes, dev_indexes = Data_Manager(data,setup).train_development_split()
@@ -1860,6 +1870,53 @@ class al_help():
                 d['coords'] = new_coords
                 candidate_data = pd.concat([candidate_data, d.to_frame().T], ignore_index=True)
         return candidate_data
+    
+    @staticmethod
+    def random_walk_vectorized(old_data_coords, sigma, at_types, fixed_types=[]):
+        """Apply random perturbations to atomic coordinates.
+
+        Parameters
+        ----------
+        coords : object containing the coords of each point
+            
+        sigma : float
+        Returns
+        -------
+        numpy.ndarray
+            Perturbed coordinates.
+        """
+        # vectorize the coords
+        to_config_low_index = []
+        to_config_up_index = []
+        vec_coords = [ ]
+        ntot = 0
+        idx_move = []
+        choose_from = [j for j, at in enumerate(at_types) if at not in fixed_types ]
+        for j,c in enumerate(old_data_coords):
+            na = len(c)
+            to_config_low_index.append(ntot)
+            to_config_up_index.append(ntot + na)
+            vec_coords.extend(c)
+
+            idx = np.random.choice(choose_from)
+            idx_move.append(idx +ntot)
+            ntot+=na
+
+        vec_coords = np.array(vec_coords)
+        to_config_low_index =  np.array(to_config_low_index)
+        to_config_up_index =  np.array(to_config_up_index)
+        idx_move = np.array(idx_move)
+
+        #assert  vec_coords.shape == (ntot, 3) , 'shape of vec_coords is wrong '
+        #assert  idx_move.shape == (len(old_data_coords), ) , 'shape of idx_move is wrong '
+        #assert  to_config_low_index.shape == (len(old_data_coords), ) , 'shape of to_config_low_index is wrong '
+        #assert  to_config_up_index.shape == (len(old_data_coords), ) , 'shape of to_config_up_index is wrong '
+        
+        r_move =  np.random.normal(0 , sigma,(len(idx_move), 3) )
+        vec_coords[idx_move] += r_move
+        
+        new_coords = [list(vec_coords[l:u]) for l, u in zip(to_config_low_index, to_config_up_index) ]
+        return new_coords
     
     @staticmethod
     def petrube_coords(coords,sigma, method, bodies = {} ):
