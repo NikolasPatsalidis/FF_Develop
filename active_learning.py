@@ -846,7 +846,7 @@ eval $linecm
             status_info = check_result.stdout.strip().split()
             if len(status_info) >= 5 and checked_times%50==0:
                 state = status_info[4]  # State is typically 5th column
-                print(f"Job {job_id} status: {state}     |    {50*sched.poll_interval*checked_times} sec passed")
+                print(f"Job {job_id} status: {state}     |    {sched.poll_interval*checked_times} sec passed")
             
             time.sleep(sched.poll_interval)
             
