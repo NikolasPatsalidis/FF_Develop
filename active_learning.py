@@ -262,16 +262,19 @@ class DFTConfig(ConfigBase):
         'mpi_command': 'mpirun -np 4',
         'input_extension': '.in',
         'output_extension': '.log',
-        # QE specific
-        'ecutwfc': 80.0,
-        'ecutrho': 320.0,
-        'input_dft': 'vdw-df2',
+        # QE specific - input parameters
+        'ecutwfc': 50.0,
+        'ecutrho': 400.0,
+        'input_dft': 'vdw-df3-opt1',
         'k_points': '1 1 1',
-        'calculation': 'scf',
-        'conv_thr': 1e-6,
-        'mixing_beta': 0.7,
+        'calculation': 'relax',
+        'ibrav': 0,
+        'conv_thr': 1e-7,
+        'mixing_beta': 0.2,
         'electron_maxstep': 100,
-        # Pseudopotential directory
+        'scf_must_converge': '.false.',
+        'nstep': 1,
+        # Pseudopotential settings
         'pseudo_dir': './pseudo',
         'pseudo_map': '',               # e.g., "C:C.pbe.UPF,O:O.pbe.UPF"
         # QE output quality thresholds for data cleaning
@@ -370,18 +373,8 @@ class ActiveLearningPipeline:
         self.target_temperature = self.al_config.target_temperature
         self.beta_sampling = 1.0 / (self.kB * self.target_temperature)
         
-        # DFT parameters
-        self.dft_software = self.dft_config.software
+        # DFT parameters - all accessed via self.dft_config
         self.pseudo_map = self.dft_config.get_pseudo_map_dict()
-        
-        # QE config dict for backward compatibility with prepare_dft
-        self.qe_config = {
-            'calculation': self.dft_config.calculation,
-            'k_points': self.dft_config.get_kpoints_tuple(),
-            'ecutwfc': self.dft_config.ecutwfc,
-            'ecutrho': self.dft_config.ecutrho,
-            'input_dft': self.dft_config.input_dft,
-        }
         
         # Initialize helpers
         self.al = ff.al_help()
@@ -627,7 +620,7 @@ class ActiveLearningPipeline:
         
         return selected_data
     
-    def prepare_dft(self, iteration, selected_data, dft_software='QE'):
+    def prepare_dft(self, iteration, selected_data):
         """
         Prepare DFT input files using qe_io.
         
@@ -636,7 +629,7 @@ class ActiveLearningPipeline:
         iteration : int
             Current iteration number.
         selected_data : pd.DataFrame
-            Selected configurations for DFT.
+            Selected configurations for DFT. Must contain 'at_type', 'coords', and 'lattice' columns.
         """
         print("\n--- STEP C.1: PREPARING DFT INPUT FILES ---")
         
@@ -644,17 +637,30 @@ class ActiveLearningPipeline:
         dft_dir = f'{self.datapath}/R{next_iter}'
         os.makedirs(dft_dir, exist_ok=True)
         
-        # Write QE input files for each configuration
+        dft_cfg = self.dft_config
+        
+        # Write input files for each configuration
         for idx, row in selected_data.iterrows():
             config_dir = f'{dft_dir}/config_{idx}'
             os.makedirs(config_dir, exist_ok=True)
             
             at_types = row['at_type']
             coords = row['coords']
-            if dft_software == 'QE':
-                # Get cell from config or use default
-                cell = row.get('lattice', self._default_cell(coords))
-                # Write QE input
+            
+            if dft_cfg.software in ['qespresso', 'qe']:
+                # Get cell from config - lattice must be preserved through sampling
+                if 'lattice' not in row or row['lattice'] is None:
+                    raise ValueError(f"Config {idx} missing 'lattice' column. Ensure lattice is preserved through sampling.")
+                cell = row['lattice']
+                
+                # Create fixed filter from al_config.fixed_types
+                fixed_types = self.al_config.fixed_types
+                if fixed_types:
+                    fixed = [i for i, at in enumerate(at_types) if at in fixed_types]
+                else:
+                    fixed = None
+                
+                # Write QE input using all dft_config parameters
                 qe_io.write_pw_input(
                     at_types=at_types,
                     positions=coords,
@@ -662,27 +668,25 @@ class ActiveLearningPipeline:
                     pseudo_map=self.pseudo_map,
                     prefix=f'config_{idx}',
                     path=config_dir,
-                    calculation=self.qe_config.get('calculation', 'scf'),
-                    k_points=self.qe_config.get('k_points', (1, 1, 1)),
-                    ecutwfc=self.qe_config.get('ecutwfc', 80),
-                    ecutrho=self.qe_config.get('ecutrho', 320),
-                    input_dft=self.qe_config.get('input_dft', 'vdw-df2'),
+                    input_dft=dft_cfg.input_dft,
+                    fixed=fixed,
+                    calculation=dft_cfg.calculation,
+                    ibrav=dft_cfg.ibrav,
+                    conv_thr=dft_cfg.conv_thr,
+                    electron_maxstep=dft_cfg.electron_maxstep,
+                    mixing_beta=dft_cfg.mixing_beta,
+                    scf_must_converge=dft_cfg.scf_must_converge,
+                    ecutwfc=dft_cfg.ecutwfc,
+                    ecutrho=dft_cfg.ecutrho,
+                    k_points=dft_cfg.get_kpoints_tuple(),
+                    nstep=dft_cfg.nstep,
                 )
-
-                if False:
-                    # Also write xyz for reference
-                    qe_io.write_xyz(
-                        f'{config_dir}/structure.xyz',
-                        at_types,
-                        coords,
-                        comment=f'Config {idx} for DFT'
-                    )
-        if True:
-            # Write a summary file
-            with open(f'{dft_dir}/batch_summary.txt', 'w') as f:
-                f.write(f'Active Learning Iteration: {next_iter}\n')
-                f.write(f'Number of configurations: {len(selected_data)}\n')
-                f.write(f'Timestamp: {pd.Timestamp.now()}\n')
+        
+        # Write a summary file
+        with open(f'{dft_dir}/batch_summary.txt', 'w') as f:
+            f.write(f'Active Learning Iteration: {next_iter}\n')
+            f.write(f'Number of configurations: {len(selected_data)}\n')
+            f.write(f'Timestamp: {pd.Timestamp.now()}\n')
         
         print(f'Prepared {len(selected_data)} DFT input files in {dft_dir}')
     

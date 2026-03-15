@@ -632,7 +632,11 @@ class al_help():
 
         c = copy.deepcopy(data['coords'].to_numpy())
         
-        init_data = copy.deepcopy(data[['at_type','sys_name','natoms','coords', 'bodies']])
+        # Preserve lattice column if it exists
+        cols_to_keep = ['at_type','sys_name','natoms','coords', 'bodies']
+        if 'lattice' in data.columns:
+            cols_to_keep.append('lattice')
+        init_data = copy.deepcopy(data[cols_to_keep])
         init_data['coords'] = c
         systems = np.unique(init_data['sys_name'])
         
