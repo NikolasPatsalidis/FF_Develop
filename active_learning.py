@@ -749,6 +749,7 @@ class ActiveLearningPipeline:
 #SBATCH --ntasks-per-node={sched.ntasks_per_node}
 #SBATCH --partition={sched.partition}
 #SBATCH --time={sched.time_limit}
+#SBATCH --mem={sched.memory}
 
 """
         # Add module loads
