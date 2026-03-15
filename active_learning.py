@@ -857,7 +857,10 @@ eval $linecm
     
     def process_dft_outputs(self, iteration):
         """
-        Copy DFT output files (.log/.out) from R{next_iter} to L{next_iter}.
+        Copy validated DFT output files (.log/.out) from R{next_iter} to L{next_iter}.
+        
+        Only copies files that contain at least one valid configuration with
+        energy, forces, and cell data.
         
         Parameters
         ----------
@@ -873,20 +876,66 @@ eval $linecm
         output_dir = f'{self.datapath}/L{next_iter}'
         os.makedirs(output_dir, exist_ok=True)
         
-        # Find and copy all .log and .out files from R{next_iter} to L{next_iter}
+        # Find and validate .log and .out files before copying
         copied_count = 0
+        skipped_count = 0
+        
         for root, dirs, files in os.walk(dft_dir):
             for f in files:
                 if f.endswith('.out') or f.endswith('.log'):
                     src_path = os.path.join(root, f)
-                    dst_path = os.path.join(output_dir, f)
-                    shutil.copy2(src_path, dst_path)
-                    copied_count += 1
+                    
+                    # Validate the file has required data
+                    if self._validate_qe_output(src_path):
+                        dst_path = os.path.join(output_dir, f)
+                        shutil.copy2(src_path, dst_path)
+                        copied_count += 1
+                    else:
+                        print(f"Warning: {f} has not finished or missing data - not copied to L{next_iter}")
+                        skipped_count += 1
         
-        if copied_count == 0:
+        if copied_count == 0 and skipped_count == 0:
             print(f"No .log or .out files found in {dft_dir}")
         else:
-            print(f"Copied {copied_count} output files from {dft_dir} to {output_dir}")
+            print(f"Copied {copied_count} valid output files to {output_dir}")
+            if skipped_count > 0:
+                print(f"Skipped {skipped_count} incomplete/invalid files")
+    
+    def _validate_qe_output(self, filepath):
+        """
+        Validate that a QE output file contains at least one complete configuration.
+        
+        Checks for presence of: energy, forces, and cell/lattice data.
+        
+        Returns
+        -------
+        bool
+            True if file contains valid data, False otherwise.
+        """
+        try:
+            with open(filepath, 'r') as f:
+                lines = f.readlines()
+            
+            # Check for energy
+            energies = qe_io.extract_energies(lines)
+            if not energies.get('e_opt') and not energies.get('e_not_opt'):
+                return False
+            
+            # Check for forces
+            forces = qe_io.extract_forces(lines)
+            if not forces or len(forces) == 0:
+                return False
+            
+            # Check for cell/lattice
+            cell = qe_io.extract_lattice_params(lines)
+            if cell is None or (isinstance(cell, np.ndarray) and cell.size == 0):
+                return False
+            
+            return True
+            
+        except Exception as e:
+            print(f"Error validating {filepath}: {e}")
+            return False
     
     def _read_qe_to_dataframe(self, filename):
         """
