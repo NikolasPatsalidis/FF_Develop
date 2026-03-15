@@ -825,9 +825,10 @@ eval $linecm
             print(f"Could not parse job ID from: {result.stdout}")
             return
         
-        # Wait for job completion
+        # Wait for job completion 
         print(f"Waiting for job {job_id} to complete (polling every {sched.poll_interval}s)...")
         
+        checked_times = 0
         while True:
             # Check if job is still in queue
             check_result = subprocess.run(
@@ -843,11 +844,13 @@ eval $linecm
             
             # Show status
             status_info = check_result.stdout.strip().split()
-            if len(status_info) >= 5:
+            if len(status_info) >= 5 and checked_times%50==0:
                 state = status_info[4]  # State is typically 5th column
-                print(f"Job {job_id} status: {state}")
+                print(f"Job {job_id} status: {state}     |    {50*sched.poll_interval*checked_times} sec passed")
             
             time.sleep(sched.poll_interval)
+            
+            checked_times +=1
         
         print("DFT calculations finished")
         return
@@ -946,7 +949,7 @@ eval $linecm
             print(f"No evaluation data found at {path_log}")
             return
         
-        self.al.log_to_ffdata(path_log, path_ffdata, dft_software=self.dft_software)
+        self.al.log_to_ffdata(path_log, path_ffdata, dft_software=self.dft_config.software)
         
         data = self.al.data_from_directory(path_ffdata)
         self.al.make_absolute_Energy_to_interaction(data, self.setup)
