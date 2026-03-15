@@ -426,8 +426,10 @@ class ActiveLearningPipeline:
                 
                 # Step C: Prepare and run DFT (placeholder)
                 self.prepare_dft(iteration, selected_data)
-                self.prepare_submission(iteration)
                 
+                self.prepare_submission_files(iteration)
+                
+                self.submit_and_wait(iteration)
                 # Process DFT outputs
                 self.process_dft_outputs(iteration)
             
@@ -692,7 +694,7 @@ class ActiveLearningPipeline:
         
         print(f'Prepared {len(selected_data)} DFT input files in {dft_dir}')
     
-    def prepare_submission(self, iteration):
+    def prepare_submission_files(self, iteration):
         """
         Generate SLURM submission script and runlist for DFT calculations.
         
@@ -794,7 +796,7 @@ eval $linecm
         iteration : int
             Current iteration number.
         """
-        print("\n--- STEP C.3: PROCESSING DFT OUTPUTS ---")
+        print("\n--- STEP C.4: PROCESSING DFT OUTPUTS ---")
         
         next_iter = iteration + 1
         dft_dir = f'{self.datapath}/R{next_iter}'
