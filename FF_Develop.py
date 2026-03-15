@@ -1719,8 +1719,12 @@ class al_help():
             files = [f for f in os.listdir(path) if f.endswith('.ffdata') or f.endswith('.xyz')]
         
         for fname in files:
-            df = Data_Manager.read_xyz('{:s}/{:s}'.format(path, fname))
-            data = pd.concat([data, df], ignore_index=True)
+            try:
+                df = Data_Manager.read_xyz('{:s}/{:s}'.format(path, fname))
+                data = pd.concat([data, df], ignore_index=True)
+            except (UnicodeDecodeError, ValueError) as e:
+                print(f"Warning: Could not read {fname}: {e}")
+                continue
         return data
     
 
@@ -6902,7 +6906,7 @@ class Data_Manager():
     @staticmethod
     def read_xyz(fname):
         """Read a single-frame XYZ file into a DataFrame."""
-        with open(fname) as f:
+        with open(fname, encoding='utf-8', errors='replace') as f:
             lines = f.readlines()
             f.closed
         return Data_Manager.lines_one_frame(lines)
