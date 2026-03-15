@@ -426,7 +426,7 @@ class ActiveLearningPipeline:
                 
                 # Step C: Prepare and run DFT (placeholder)
                 self.prepare_dft(iteration, selected_data)
-                self.run_dft(iteration)
+                self.prepare_submission(iteration)
                 
                 # Process DFT outputs
                 self.process_dft_outputs(iteration)
@@ -692,56 +692,98 @@ class ActiveLearningPipeline:
         
         print(f'Prepared {len(selected_data)} DFT input files in {dft_dir}')
     
-    def run_dft(self, iteration):
+    def prepare_submission(self, iteration):
         """
-        Run DFT calculations.
+        Generate SLURM submission script and runlist for DFT calculations.
         
-        **PLACEHOLDER**: User should fill this method with their HPC scheduler calls.
+        Creates:
+        - runlist.txt: List of DFT run commands for array job
+        - run_dft.sh: SLURM submission script
         
         Parameters
         ----------
         iteration : int
             Current iteration number.
         """
-        print("\n--- STEP C.2: RUNNING DFT ---")
-        print("=" * 40)
-        print("PLACEHOLDER: DFT EXECUTION")
-        print("=" * 40)
-        print("""
-        TODO: Fill this method with your DFT execution logic:
+        print("\n--- STEP C.2: PREPARING DFT SUBMISSION ---")
         
-        1. Submit jobs to your HPC scheduler (SLURM, PBS, etc.)
-        2. Wait for jobs to complete
-        3. Check for convergence/errors
-        
-        Example for SLURM:
-        -----------------
         next_iter = iteration + 1
         dft_dir = f'{self.datapath}/R{next_iter}'
+        sched = self.scheduler_config
+        dft_cfg = self.dft_config
         
-        # Submit job
-        result = subprocess.run(
-            ['sbatch', 'run_qe.sh'],
-            cwd=dft_dir,
-            capture_output=True,
-            text=True
-        )
-        job_id = result.stdout.split()[-1]
+        # Get list of config directories
+        config_dirs = [d for d in os.listdir(dft_dir) 
+                       if os.path.isdir(f'{dft_dir}/{d}') and d != '__pycache__']
+        config_dirs.sort()
         
-        # Wait for completion
-        while True:
-            result = subprocess.run(
-                ['squeue', '-j', job_id],
-                capture_output=True,
-                text=True
-            )
-            if job_id not in result.stdout:
-                break
-            time.sleep(60)
-        """)
-        print("=" * 40)
-        print("Skipping DFT execution - user must implement")
-        print("=" * 40)
+        nbatch = len(config_dirs)
+        if nbatch == 0:
+            print(f"Warning: No configuration directories found in {dft_dir}")
+            return
+        
+        # Write runlist.txt
+        runlist_path = f'{dft_dir}/runlist.txt'
+        with open(runlist_path, 'w') as f:
+            for name in config_dirs:
+                if dft_cfg.software in ['qespresso', 'qe']:
+                    cmd = f"cd {name} ; mpirun -n {sched.ntasks_per_node} pw.x < {name}.in > {name}.log"
+                elif dft_cfg.software == 'gaussian':
+                    cmd = f"cd {name} ; g16 < {name}.com > {name}.log"
+                else:
+                    cmd = f"cd {name} ; echo 'Unknown DFT software'"
+                f.write(f"{cmd}\n")
+        
+        print(f"Written runlist.txt with {nbatch} commands")
+        
+        # Generate SLURM script
+        job_name = f"alR{next_iter}"
+        script = f"""#!/bin/bash
+#SBATCH --job-name={job_name}
+#SBATCH --output=output
+#SBATCH --error=error
+#SBATCH --array=1-{nbatch}%{nbatch}
+#SBATCH --nodes={sched.nodes}
+#SBATCH --ntasks-per-node={sched.ntasks_per_node}
+#SBATCH --partition={sched.partition}
+#SBATCH --time={sched.time_limit}
+
+"""
+        # Add module loads
+        if sched.modules:
+            for mod in sched.modules.split(','):
+                mod = mod.strip()
+                if mod:
+                    script += f"module load {mod}\n"
+            script += "\n"
+        
+        # Add pre-commands if any
+        if sched.pre_commands:
+            script += f"{sched.pre_commands}\n\n"
+        
+        # Add array job logic
+        script += """# Get the command from runlist.txt based on array task ID
+parent='.'
+linecm=$(sed -n "${SLURM_ARRAY_TASK_ID}p" ${parent}/runlist.txt)
+
+echo "${linecm}"
+eval $linecm
+"""
+        
+        # Add post-commands if any
+        if sched.post_commands:
+            script += f"\n{sched.post_commands}\n"
+        
+        # Write SLURM script
+        script_path = f'{dft_dir}/run_dft.sh'
+        with open(script_path, 'w') as f:
+            f.write(script)
+        
+        print(f"Written SLURM script: {script_path}")
+        print(f"Job name: {job_name}")
+        print(f"Array: 1-{nbatch}%{nbatch}")
+        print(f"\nTo submit: cd {dft_dir} && sbatch run_dft.sh")
+        return 
     
     def process_dft_outputs(self, iteration):
         """
