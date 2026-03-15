@@ -164,7 +164,7 @@ class SchedulerConfig(ConfigBase):
         'pre_commands': '',             # commands to run before DFT
         'post_commands': '',            # commands after DFT
         'wait_for_completion': True,
-        'poll_interval': 60,            # seconds between job status checks
+        'poll_interval': 6,            # seconds between job status checks
     }
     
     def __init__(self):
@@ -787,15 +787,82 @@ eval $linecm
         print(f"\nTo submit: cd {dft_dir} && sbatch run_dft.sh")
         return 
     
-    def process_dft_outputs(self, iteration):
+    def submit_and_wait(self, iteration):
         """
-        Process DFT output files and convert to training data format.
+        Submit SLURM job and wait for completion.
         
         Parameters
         ----------
         iteration : int
             Current iteration number.
         """
+        import subprocess
+        import time
+        
+        print("\n--- STEP C.3: SUBMITTING AND WAITING FOR DFT ---")
+        
+        next_iter = iteration + 1
+        dft_dir = f'{self.datapath}/R{next_iter}'
+        sched = self.scheduler_config
+        
+        # Submit the job
+        result = subprocess.run(
+            ['sbatch', 'run_dft.sh'],
+            cwd=dft_dir,
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode != 0:
+            print(f"Error submitting job: {result.stderr}")
+            return
+        
+        # Extract job ID from output (e.g., "Submitted batch job 12345")
+        try:
+            job_id = result.stdout.strip().split()[-1]
+            print(f"Submitted job {job_id}")
+        except IndexError:
+            print(f"Could not parse job ID from: {result.stdout}")
+            return
+        
+        # Wait for job completion
+        print(f"Waiting for job {job_id} to complete (polling every {sched.poll_interval}s)...")
+        
+        while True:
+            # Check if job is still in queue
+            check_result = subprocess.run(
+                ['squeue', '-j', job_id, '-h'],
+                capture_output=True,
+                text=True
+            )
+            
+            # If job is no longer in queue, it has finished
+            if not check_result.stdout.strip():
+                print(f"Job {job_id} completed")
+                break
+            
+            # Show status
+            status_info = check_result.stdout.strip().split()
+            if len(status_info) >= 5:
+                state = status_info[4]  # State is typically 5th column
+                print(f"Job {job_id} status: {state}")
+            
+            time.sleep(sched.poll_interval)
+        
+        print("DFT calculations finished")
+        return
+    
+    def process_dft_outputs(self, iteration):
+        """
+        Copy DFT output files (.log/.out) from R{next_iter} to L{next_iter}.
+        
+        Parameters
+        ----------
+        iteration : int
+            Current iteration number.
+        """
+        import shutil
+        
         print("\n--- STEP C.4: PROCESSING DFT OUTPUTS ---")
         
         next_iter = iteration + 1
@@ -803,35 +870,20 @@ eval $linecm
         output_dir = f'{self.datapath}/L{next_iter}'
         os.makedirs(output_dir, exist_ok=True)
         
-        # Find all QE output files
-        qe_outputs = []
+        # Find and copy all .log and .out files from R{next_iter} to L{next_iter}
+        copied_count = 0
         for root, dirs, files in os.walk(dft_dir):
             for f in files:
                 if f.endswith('.out') or f.endswith('.log'):
-                    qe_outputs.append(os.path.join(root, f))
+                    src_path = os.path.join(root, f)
+                    dst_path = os.path.join(output_dir, f)
+                    shutil.copy2(src_path, dst_path)
+                    copied_count += 1
         
-        if not qe_outputs:
-            print(f"No QE output files found in {dft_dir}")
-            print("Looking for *.out or *.log files")
-            return
-        
-        # Process each output file
-        all_data = []
-        for qe_file in qe_outputs:
-            try:
-                data = self._read_qe_to_dataframe(qe_file)
-                if data is not None:
-                    all_data.append(data)
-            except Exception as e:
-                print(f"Error processing {qe_file}: {e}")
-        
-        if all_data:
-            combined_data = pd.concat(all_data, ignore_index=True)
-            # Save in format expected by al_help
-            combined_data.to_pickle(f'{output_dir}/dft_data.pkl')
-            print(f'Processed {len(combined_data)} configurations from DFT')
+        if copied_count == 0:
+            print(f"No .log or .out files found in {dft_dir}")
         else:
-            print("No valid DFT data extracted")
+            print(f"Copied {copied_count} output files from {dft_dir} to {output_dir}")
     
     def _read_qe_to_dataframe(self, filename):
         """
