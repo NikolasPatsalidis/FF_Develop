@@ -2592,7 +2592,7 @@ class al_help():
                 print('warning: DFT null data --> {}'.format(ve))
                 continue
          
-            labels = [c for c in data.columns if c not in ['coords', 'natoms', 'at_type', 'filename', 'Forces']]
+            labels = [c for c in data.columns if c not in ['coords', 'natoms', 'at_type', 'filename', 'Forces', 'lattice']]
             base_name = fname.rsplit('.', 1)[0]
             Data_Manager.save_selected_data('{:s}/{:s}.ffdata'.format(output_path, base_name), data, labels=labels)
         return
@@ -2652,6 +2652,16 @@ class al_help():
         if not energies:
             raise ValueError(f"No converged energies found in {filepath}")
         
+        # Extract lattice parameters
+        lattice = qe_io.extract_lattice_params(lines)
+        # Handle case where lattice is a single (3,3) array - replicate for all configs
+        if isinstance(lattice, np.ndarray) and lattice.shape == (3, 3):
+            lattice_list = [lattice] * len(energies)
+        elif isinstance(lattice, list):
+            lattice_list = lattice
+        else:
+            lattice_list = [lattice] * len(energies)
+        
         # Extract forces if requested
         forces_list = []
         if read_forces:
@@ -2681,6 +2691,12 @@ class al_help():
         gradient_errors = pad_array(gradient_errors, n_configs)
         scf_corrections = pad_array(scf_corrections, n_configs)
         
+        # Pad lattice_list if needed
+        if len(lattice_list) < n_configs:
+            # Use last lattice for remaining configs
+            last_lattice = lattice_list[-1] if lattice_list else None
+            lattice_list = lattice_list + [last_lattice] * (n_configs - len(lattice_list))
+        
         data_rows = []
         for i in range(n_configs):
             # find a sys_name based on stoichiometry
@@ -2700,6 +2716,7 @@ class al_help():
                 'gradient_error': gradient_errors[i],
                 'scf_correction': scf_corrections[i],
                 'sys_name':sys_name,
+                'lattice': lattice_list[i],
             }
             if read_forces and forces_list[i] is not None:
                 row['Forces'] = forces_list[i]
@@ -6761,33 +6778,44 @@ class Data_Manager():
     
     @staticmethod
     def save_selected_data(fname,data,selector=dict(),labels=None):
-        """Save selected data to an XYZ file with optional labels in comments."""
+        """Save selected data to an XYZ file with optional labels in comments.
+        
+        Lattice vectors are stored in extended XYZ format: Lattice="a1x a1y a1z a2x a2y a2z a3x a3y a3z"
+        """
         if labels is not  None:
             for j,pars in data.iterrows():
                 comment = ' , '.join(['{:s}  = {:}'.format(lab, pars[lab]) for lab in labels])
                 data.loc[j,'comment'] = 'index = {} , '.format(j) + comment
         dataT = data[Data_Manager.data_filter(data,selector)]
         with open(fname,'w') as f:
-            for j,data in dataT.iterrows():
-                at = data['at_type']
-                ac = data['coords']
-                na = data['natoms']
+            for j,row in dataT.iterrows():
+                at = row['at_type']
+                ac = row['coords']
+                na = row['natoms']
                 try:
-                    fa = data['Forces']
+                    fa = row['Forces']
                     fa_ex=True
                 except:
                     fa_ex=False
                 try:
-                    comment = data['comment']
+                    comment = row['comment']
                 except:
                     comment = ''
+                
+                # Add lattice to comment if available
+                if 'lattice' in row and row['lattice'] is not None:
+                    lat = np.array(row['lattice'])
+                    if lat.shape == (3, 3):
+                        lat_str = ' '.join([f'{v:.8f}' for v in lat.flatten()])
+                        comment = f'Lattice="{lat_str}" , ' + comment
+                
                 f.write('{:d} \n{:s}\n'.format(na,comment))
                 if fa_ex == False:
-                    for j in range(na):
-                        f.write('{:3s} \t {:8.8f} \t {:8.8f} \t {:8.8f}  \n'.format(at[j],ac[j][0],ac[j][1],ac[j][2]) )
+                    for k in range(na):
+                        f.write('{:3s} \t {:8.8f} \t {:8.8f} \t {:8.8f}  \n'.format(at[k],ac[k][0],ac[k][1],ac[k][2]) )
                 else:
-                    for j in range(na):
-                        f.write('{:3s} \t {:8.8f} \t {:8.8f} \t {:8.8f}  \t {:8.8f} \t {:8.8f} \t {:8.8f}\n'.format(at[j],ac[j][0],ac[j][1],ac[j][2], fa[j][0],fa[j][1],fa[j][2]) )
+                    for k in range(na):
+                        f.write('{:3s} \t {:8.8f} \t {:8.8f} \t {:8.8f}  \t {:8.8f} \t {:8.8f} \t {:8.8f}\n'.format(at[k],ac[k][0],ac[k][1],ac[k][2], fa[k][0],fa[k][1],fa[k][2]) )
             f.closed
             
         return 
@@ -6880,13 +6908,34 @@ class Data_Manager():
         return Data_Manager.lines_one_frame(lines)
     @staticmethod
     def lines_one_frame(lines):
-        """Parse lines from a single XYZ frame into a DataFrame."""
+        """Parse lines from a single XYZ frame into a DataFrame.
+        
+        Parses lattice from extended XYZ format: Lattice="a1x a1y a1z a2x a2y a2z a3x a3y a3z"
+        """
         lines = [line.strip('\n') for line in lines]
         na = int(lines[0])
         
         natoms = [na]
-        attrs = lines[1].split(',')
-        atr = {k.split('=')[0].strip() : k.split('=')[1].strip() for k in attrs}
+        comment_line = lines[1]
+        
+        # Extract lattice if present (extended XYZ format)
+        lattice = None
+        import re
+        lattice_match = re.search(r'Lattice="([^"]+)"', comment_line)
+        if lattice_match:
+            lat_values = [float(x) for x in lattice_match.group(1).split()]
+            if len(lat_values) == 9:
+                lattice = np.array(lat_values).reshape(3, 3)
+            # Remove Lattice from comment for further parsing
+            comment_line = re.sub(r'Lattice="[^"]+" , ', '', comment_line)
+        
+        attrs = comment_line.split(',')
+        atr = {}
+        for k in attrs:
+            if '=' in k:
+                key, val = k.split('=', 1)
+                atr[key.strip()] = val.strip()
+        
         newattr = dict()
         for k,v in atr.items():
             try:
@@ -6898,6 +6947,8 @@ class Data_Manager():
                     v1 = v
             newattr[k] = [v1]
         newattr['natoms'] = natoms
+        if lattice is not None:
+            newattr['lattice'] = [lattice]
         at_types = []
         coords= []
         forces=[]
