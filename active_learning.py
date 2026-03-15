@@ -641,7 +641,9 @@ class ActiveLearningPipeline:
         
         # Write input files for each configuration
         for idx, row in selected_data.iterrows():
-            config_dir = f'{dft_dir}/config_{idx}'
+            sys_name = row['sys_name']
+            name = f'{sys_name}_{idx}'
+            config_dir = f'{dft_dir}/{name}'
             os.makedirs(config_dir, exist_ok=True)
             
             at_types = row['at_type']
@@ -656,16 +658,17 @@ class ActiveLearningPipeline:
                 # Create fixed filter from al_config.fixed_types
                 fixed_types = self.al_config.fixed_types
                 if fixed_types:
-                    fixed = [i for i, at in enumerate(at_types) if at in fixed_types]
+                    fixed = np.array( [True if at in fixed_types else False for  at in at_types ] )
                 else:
                     fixed = None
+
                 # Write QE input using all dft_config parameters
                 qe_io.write_pw_input(
                     at_types=at_types,
                     positions=coords,
                     cell=cell,
                     pseudo_map=self.pseudo_map,
-                    prefix=f'config_{idx}',
+                    prefix=name,
                     path=config_dir,
                     input_dft=dft_cfg.input_dft,
                     fixed=fixed,
