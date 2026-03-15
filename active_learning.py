@@ -618,7 +618,7 @@ class ActiveLearningPipeline:
             selected_data = candidate_data
         else:
             selected_data = self.al.random_selection(
-                data, self.setup, candidate_data, self.batch_size
+                data,  candidate_data, self.setup, self.al_config
             )
         selected_data = selected_data.reset_index(drop=True)
         

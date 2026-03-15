@@ -2102,7 +2102,7 @@ class al_help():
 
 
     @staticmethod
-    def find_histogram_uncertainty( candidate_data, existing_data,  setup):
+    def find_histogram_uncertainty( candidate_data, existing_data,  setup, fixed_types=[]):
         """Compute uncertainty scores for candidates based on descriptor histograms.
 
         For each candidate, measures how much its descriptor values overlap
@@ -2136,6 +2136,8 @@ class al_help():
         histograms = dict()
         for model in setup.opt_models.values():
             ty = model.type
+            if np.array( [t in fixed_types for t in ty] ).all():
+                continue
             fe = model.feature
             dd = man_ex.get_distribution(ty, fe)
 
@@ -2179,19 +2181,17 @@ class al_help():
 
 
     @staticmethod
-    def random_selection(existing_data , setup,candidate_data, batchsize, method='histogram_uncertainty'):
+    def random_selection(existing_data ,candidate_data,setup, al_config,  method='histogram_uncertainty'):
         """Select a batch of candidates using random or energy-controlled sampling.
 
         Parameters
         ----------
         data : pandas.DataFrame
             Current training dataset (used for system proportions).
-        setup : Setup_Interfacial_Optimization
-            Configuration with `bS` for Boltzmann selection.
         candidate_data : pandas.DataFrame
             Pool of candidate configurations.
-        batchsize : int
-            Number of configurations to select.
+        setup : Setup_Interfacial_Optimization
+        al_config : active learning configuration object
         method : str
             Selection method: `'random'`, `'control_energy'`, or
             `'histogram_uncertainty'`.
@@ -2201,6 +2201,9 @@ class al_help():
         pandas.DataFrame
             Selected configurations.
         """
+        batchsize = al_config.batch_size
+        fixed_types = al_config.fixed_types
+        
         al_help.make_interactions(candidate_data,setup) 
         #candidate_data = al_help.clean_well_separated_nanostructures(candidate_data,setup)
         
@@ -2247,7 +2250,8 @@ class al_help():
                 psel = np.exp (- (u_f - u_f.min())/setup.bS)
                 psel /= psel.sum()
             elif method == 'histogram_uncertainty':
-                uncertainty_norm, uncertainty = al_help.find_histogram_uncertainty(candidate_data [fsystem], existing_data[fex]  , setup )
+                uncertainty_norm, uncertainty = al_help.find_histogram_uncertainty(candidate_data [fsystem], existing_data[fex]  , 
+                                                                                    setup, fixed_types )
                 psel = (1.0-zu) * uncertainty_norm + zu * np.random.uniform(0,1, size=uncertainty_norm.shape[0])
                 #psel = uncertainty.copy()
                 psel /= psel.sum()
