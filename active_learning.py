@@ -469,7 +469,7 @@ class ActiveLearningPipeline:
         # Convert log files to ffdata format
         path_log = f'{self.datapath}/L{iteration}'
         path_ffdata = f'{self.datapath}/D{iteration}'
-        self.al.log_to_ffdata(path_log, path_ffdata, dft_software=self.dft_software)
+        self.al.log_to_ffdata(path_log, path_ffdata, dft_software=self.dft_config.software)
         
         # Accumulate all data up to current iteration
         data = pd.DataFrame()
