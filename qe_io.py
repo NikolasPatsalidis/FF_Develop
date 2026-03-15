@@ -489,10 +489,11 @@ def write_xyz(filename, at_types, coords, comment="", traj=False):
 
 
 def write_pw_input(at_types, positions, cell,  pseudo_map, prefix='pw', ibrav=0,
-                   k_points = (4,4,4), input_dft='vdw-df2', conv_thr=1e-5, 
+                   k_points = (4,4,4), input_dft='vdw-df2', conv_thr=1e-6, 
                    ecutrho=320,ecutwfc=80, calculation='scf',path='.',
                    electron_maxstep = 50, lattice_params = dict(),
-                   scf_must_converge = '.true.', fixed=None, nstep=150):
+                   scf_must_converge = '.true.', fixed=None, nstep=150,
+                   mixing_beta=0.3):
     """
     Write Quantum ESPRESSO pw.in file from atomic types, positions, and pseudopotentials.
 
@@ -556,7 +557,7 @@ def write_pw_input(at_types, positions, cell,  pseudo_map, prefix='pw', ibrav=0,
         f.write(f'  conv_thr = {conv_thr}\n')
         f.write(f'  electron_maxstep = {electron_maxstep}\n' )
         f.write(f'  scf_must_converge = {scf_must_converge}\n')
-        f.write(f'  mixing_beta = 0.3\n')
+        f.write(f'  mixing_beta = {mixing_beta}\n')
         f.write(f'  mixing_mode = local-TF\n')
 
         f.write('/\n\n')

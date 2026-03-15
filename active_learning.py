@@ -659,7 +659,6 @@ class ActiveLearningPipeline:
                     fixed = [i for i, at in enumerate(at_types) if at in fixed_types]
                 else:
                     fixed = None
-                
                 # Write QE input using all dft_config parameters
                 qe_io.write_pw_input(
                     at_types=at_types,
