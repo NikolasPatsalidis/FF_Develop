@@ -1085,12 +1085,14 @@ Examples:
                         help='Path for results storage')
     
     # Override arguments (override config file values)
-    parser.add_argument('-n', '--n_iterations', type=int, default=None,
+    parser.add_argument('--n_iterations', type=int, default=None,
                         help='Override: Number of active learning iterations')
     parser.add_argument('-b', '--batch_size', type=int, default=None,
                         help='Override: Batch size for configuration selection')
-    parser.add_argument('-start', '--start_iteration', type=int, default=0,
+    parser.add_argument('-n', '--start_iteration', type=int, default=0,
                         help='Starting iteration (for continuing runs)')
+    parser.add_argument('-e', '--existing_data', type=int, default=-1,
+                        help='Last iteration with existing data (skip sampling up to this)')
     
     # Utility arguments
     parser.add_argument('--generate-templates', action='store_true',
@@ -1285,7 +1287,11 @@ def main():
         datapath=args.datapath,
         results_path=args.results_path
     )
-    print( f"start iteration = {args.start_iteration}")
+    # Override existing_data from command line if provided
+    if args.existing_data != -1:
+        pipeline.existing_data = args.existing_data
+    
+    print(f"start_iteration = {args.start_iteration}, existing_data = {pipeline.existing_data}")
     pipeline.run(start_iteration=args.start_iteration)
 
 
