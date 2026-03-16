@@ -1285,6 +1285,7 @@ def main():
         datapath=args.datapath,
         results_path=args.results_path
     )
+    print( f"start iteration = {args.start_iteration}")
     pipeline.run(start_iteration=args.start_iteration)
 
 
