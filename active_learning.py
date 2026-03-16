@@ -279,7 +279,7 @@ class DFTConfig(ConfigBase):
         'pseudo_map': '',               # e.g., "C:C.pbe.UPF,O:O.pbe.UPF"
         # QE output quality thresholds for data cleaning
         'max_energy_error': 0.1,        # kcal/mol - maximum allowed energy error
-        'max_gradient_error': 1.0,      # kcal/mol/Å - maximum allowed gradient error  
+        'max_gradient_error': 500.0,      # kcal/mol/Å - maximum allowed gradient error  
         'max_scf_correction': 0.5,      # kcal/mol/Å - maximum allowed SCF correction
     }
     
@@ -513,21 +513,24 @@ class ActiveLearningPipeline:
         # Step 1: Filter by QE quality metrics (if columns exist)
         if 'energy_error' in data.columns:
             n_before = len(data)
+            mx = data["energy_error"].max()
             data = data[data['energy_error'] < self.dft_config.max_energy_error]
             n_after = len(data)
-            print(f'  Removed {n_before - n_after} configs with energy_error >= {self.dft_config.max_energy_error}  |  max = {data["energy_error"].max():4.3} ')
+            print(f'  Removed {n_before - n_after} configs with energy_error >= {self.dft_config.max_energy_error}  |  max = {mx:4.3} ')
         
         if 'gradient_error' in data.columns:
             n_before = len(data)
+            mx = data['gradient_error'].max()
             data = data[data['gradient_error'] < self.dft_config.max_gradient_error]
             n_after = len(data)
-            print(f'  Removed {n_before - n_after} configs with gradient_error >= {self.dft_config.max_gradient_error}   |  max = {data["gradient_error"].max():4.3}')
+            print(f'  Removed {n_before - n_after} configs with gradient_error >= {self.dft_config.max_gradient_error}   |  mx = {mx:4.3}')
         
         if 'scf_correction' in data.columns:
             n_before = len(data)
+            mx = data["scf_correction"].max()
             data = data[data['scf_correction'] < self.dft_config.max_scf_correction]
             n_after = len(data)
-            print(f'  Removed {n_before - n_after} configs with scf_correction >= {self.dft_config.max_scf_correction}  |  max = {data["scf_correction"].max():4.3}')
+            print(f'  Removed {n_before - n_after} configs with scf_correction >= {self.dft_config.max_scf_correction}  |  mx = {mx:4.3}')
         
         n_after_qe = len(data)
         print(f'After QE quality filtering: {n_initial} -> {n_after_qe} configs')
