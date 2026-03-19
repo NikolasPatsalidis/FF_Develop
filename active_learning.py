@@ -132,6 +132,7 @@ class ActiveLearningConfig(ConfigBase):
         'max_energy_error': 0.1,              # kcal/mol - maximum allowed energy error
         'max_gradient_error': 500.0,          # kcal/mol/Å - maximum allowed gradient error  
         'max_scf_correction': 0.5,            # kcal/mol/Å - maximum allowed SCF correction
+        'forbidden_separation': 6.0,          # Å - cutoff for detecting disconnected clusters
     }
     
     def __init__(self):
@@ -533,7 +534,10 @@ class ActiveLearningPipeline:
         n_after_qe = len(data)
         print(f'After QE quality filtering: {n_initial} -> {n_after_qe} configs')
         
-        # Step 2: Standard FF cleaning
+        # Step 2: Clean well-separated structures (disconnected clusters)
+        data = self.al.clean_well_separated_nanostructures(data, self.al_config.forbidden_separation)
+        
+        # Step 3: Standard FF cleaning
         data = self.al.clean_data(data, self.setup, self.beta_sampling)
         print('After FF cleaning:')
         self._print_column_stats(data['Energy'])
@@ -1129,7 +1133,6 @@ runpath_attributes : run
 
 max_ener        = 1.0
 force_importance = 1.0
-rclean          = 6.0
 max_force       = 0.003
 clean_perc      = 0.8
 bC              = 50.0

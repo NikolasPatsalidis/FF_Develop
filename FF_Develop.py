@@ -516,7 +516,7 @@ class al_help():
 
                     new_data = al_help.read_lammps_structs('lammps_working/samples.lammpstrj',inv_types)
                     ne = len(new_data)
-                    new_data = al_help.clean_well_separated_nanostructures(new_data, setup)
+                    new_data = al_help.clean_well_separated_nanostructures(new_data, 6.0) # should come from al_config in the feature
                     if len(new_data) < 0.1*ne:
                         print(f'MD iter {md_iter}: More than 90% of the structures were well separated! rescaling beta by 1.1 to avoid desorption or dissolution')
                         beta_sampling *= 1.1
@@ -2213,8 +2213,7 @@ class al_help():
         fixed_types = al_config.fixed_types
         
         al_help.make_interactions(candidate_data,setup) 
-        #candidate_data = al_help.clean_well_separated_nanostructures(candidate_data,setup)
-        
+
         Ucls = candidate_data['Uclass'].to_numpy()
         n = len(candidate_data)
         
@@ -2331,7 +2330,7 @@ class al_help():
             Selected configurations.
         """
         al_help.make_interactions(candidate_data,setup) 
-        candidate_data = al_help.clean_well_separated_nanostructures(candidate_data,setup)
+        candidate_data = al_help.clean_well_separated_nanostructures(candidate_data, 6.0)
         dis = []
         for k1,d1 in candidate_data.iterrows():
             disim = 0
@@ -2918,23 +2917,24 @@ class al_help():
         for i in range(c1.shape[0]):
             for j in range(c2.shape[0]):
                 r = c1[i] - c2[j]
-                d = np.dot(r,r)**0.5
-                if d <dmin:
+                d = np.dot(r , r)**0.5
+                if d < dmin:
                     dmin = d
         return dmin
+    
     @staticmethod
-    def clean_well_separated_nanostructures(data, setup):
+    def clean_well_separated_nanostructures(data, rc):
         """Remove configurations that are split into disconnected clusters.
 
         Keeps only rows where all atoms are connected through a neighbor graph
-        defined by the cutoff `setup.rclean`.
+        defined by the cutoff `rc`.
 
         Parameters
         ----------
         data : pandas.DataFrame
             Dataset with at least `coords` and `natoms`.
-        setup : Setup_Interfacial_Optimization
-            Provides `rclean` (distance cutoff in Angstrom).
+        rc : float
+            Distance cutoff in Angstrom for neighbor detection.
 
         Returns
         -------
@@ -2942,7 +2942,6 @@ class al_help():
             Filtered view of the input DataFrame.
         """
         t0 = perf_counter()
-        rc = setup.rclean
         keep_index = []
     
         for j, df in data.iterrows():
@@ -5067,8 +5066,7 @@ class Setup_Interfacial_Optimization():
         'storing_path':'Results',
         'run': '0',
         'runpath_attributes':['run'],
-        
-        'max_ener':1.0,
+     
         'force_importance':1.0,
         'rclean':6.0,
         'max_force':0.003,
