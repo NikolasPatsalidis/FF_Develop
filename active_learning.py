@@ -130,7 +130,7 @@ class ActiveLearningConfig(ConfigBase):
         'mc_asymptotic_steps':0,              # number of mc steps to skip sampling
         # Data cleaning thresholds
         'max_energy_error': 0.1,              # kcal/mol - maximum allowed energy error
-        'max_gradient_error': 500.0,          # kcal/mol/Å - maximum allowed gradient error  
+        'max_gradient_error': 1000.0,         # kcal/mol/Å - sanity check for extremely repulsive configs  
         'max_scf_correction': 0.5,            # kcal/mol/Å - maximum allowed SCF correction
         'forbidden_separation': 6.0,          # Å - cutoff for detecting disconnected clusters
     }
