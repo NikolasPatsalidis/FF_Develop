@@ -3009,7 +3009,6 @@ class al_help():
         pe = np.exp(-re / beta_sampling)
         if n > 200:
             indexes = data.index
-            #ix = np.random.choice(data.index,int(setup.clean_perc*n),replace=False,p=ps)
             ix = []
             for i,p in enumerate(pe):
                 if  re[i] < e_range:
@@ -5068,9 +5067,6 @@ class Setup_Interfacial_Optimization():
         'runpath_attributes':['run'],
      
         'force_importance':1.0,
-        'rclean':6.0,
-        'max_force':0.003,
-        'clean_perc':0.8,
         'bC':50.0,
         'bS':20.0,
         
