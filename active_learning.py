@@ -113,8 +113,6 @@ class ActiveLearningConfig(ConfigBase):
         'n_iterations': 20,
         'batch_size': 100,
         'sigma_init': 0.02,                   # initial sigma for perturbation/MC
-        'start_iteration': 0,
-        'existing_data': -1,
         'target_temperature': 500.0,
         'sampling_method_schedule': 'auto',   # 'auto', 'perturbation', 'mc', 'md'
         'perturbation_iterations': 0,         # iterations 0 to this use perturbation
@@ -130,6 +128,10 @@ class ActiveLearningConfig(ConfigBase):
         'rotate_whole': 0.5,                  # probability to rotate whole choose_from set
         'translate_whole': 0.3,               # probability to translate whole choose_from set
         'mc_asymptotic_steps':0,              # number of mc steps to skip sampling
+        # Data cleaning thresholds
+        'max_energy_error': 0.1,              # kcal/mol - maximum allowed energy error
+        'max_gradient_error': 500.0,          # kcal/mol/Å - maximum allowed gradient error  
+        'max_scf_correction': 0.5,            # kcal/mol/Å - maximum allowed SCF correction
     }
     
     def __init__(self):
@@ -277,10 +279,6 @@ class DFTConfig(ConfigBase):
         # Pseudopotential settings
         'pseudo_dir': './pseudo',
         'pseudo_map': '',               # e.g., "C:C.pbe.UPF,O:O.pbe.UPF"
-        # QE output quality thresholds for data cleaning
-        'max_energy_error': 0.1,        # kcal/mol - maximum allowed energy error
-        'max_gradient_error': 500.0,      # kcal/mol/Å - maximum allowed gradient error  
-        'max_scf_correction': 0.5,      # kcal/mol/Å - maximum allowed SCF correction
     }
     
     def __init__(self):
@@ -366,7 +364,7 @@ class ActiveLearningPipeline:
         # Extract commonly used parameters
         self.n_iterations = self.al_config.n_iterations
         self.batch_size = self.al_config.batch_size
-        self.existing_data = self.al_config.existing_data
+        self.existing_data = -1  # Set via command line -e flag. This is the default
         
         # Sampling parameters
         self.kB = 0.00198720375145233  # kcal/mol/K
@@ -416,7 +414,7 @@ class ActiveLearningPipeline:
             self.train(iteration, data)
             
             # Step B: Sampling (if not using existing data)
-            print(iteration, self.existing_data)
+            
             if iteration >= self.existing_data:
             
                 # Determine sampling method based on iteration
@@ -514,23 +512,23 @@ class ActiveLearningPipeline:
         if 'energy_error' in data.columns:
             n_before = len(data)
             mx = data["energy_error"].max()
-            data = data[data['energy_error'] < self.dft_config.max_energy_error]
+            data = data[data['energy_error'] < self.al_config.max_energy_error]
             n_after = len(data)
-            print(f'  Removed {n_before - n_after} configs with energy_error >= {self.dft_config.max_energy_error}  |  max = {mx:4.3} ')
+            print(f'  Removed {n_before - n_after} configs with energy_error >= {self.al_config.max_energy_error}  |  max = {mx:4.3} ')
         
         if 'gradient_error' in data.columns:
             n_before = len(data)
             mx = data['gradient_error'].max()
-            data = data[data['gradient_error'] < self.dft_config.max_gradient_error]
+            data = data[data['gradient_error'] < self.al_config.max_gradient_error]
             n_after = len(data)
-            print(f'  Removed {n_before - n_after} configs with gradient_error >= {self.dft_config.max_gradient_error}   |  mx = {mx:4.3}')
+            print(f'  Removed {n_before - n_after} configs with gradient_error >= {self.al_config.max_gradient_error}   |  mx = {mx:4.3}')
         
         if 'scf_correction' in data.columns:
             n_before = len(data)
             mx = data["scf_correction"].max()
-            data = data[data['scf_correction'] < self.dft_config.max_scf_correction]
+            data = data[data['scf_correction'] < self.al_config.max_scf_correction]
             n_after = len(data)
-            print(f'  Removed {n_before - n_after} configs with scf_correction >= {self.dft_config.max_scf_correction}  |  mx = {mx:4.3}')
+            print(f'  Removed {n_before - n_after} configs with scf_correction >= {self.al_config.max_scf_correction}  |  mx = {mx:4.3}')
         
         n_after_qe = len(data)
         print(f'After QE quality filtering: {n_initial} -> {n_after_qe} configs')
