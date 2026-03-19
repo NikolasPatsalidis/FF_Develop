@@ -416,6 +416,7 @@ class ActiveLearningPipeline:
             self.train(iteration, data)
             
             # Step B: Sampling (if not using existing data)
+            print(iteration, self.existing_data)
             if iteration >= self.existing_data:
             
                 # Determine sampling method based on iteration
@@ -439,7 +440,6 @@ class ActiveLearningPipeline:
             print(f"\nIteration {iteration} completed in {perf_counter() - t_iter_start:.2f} sec")
             
             # Update input files for next iteration (from results folder)
-            self.methodology_file = f"{self.setup.runpath}/training.in"
             self.potential_file = f"{self.setup.runpath}/potential.in"
             self.setup = ff.Setup_Interfacial_Optimization(self.methodology_file, self.potential_file)
             
