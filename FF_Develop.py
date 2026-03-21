@@ -516,7 +516,7 @@ class al_help():
 
                     new_data = al_help.read_lammps_structs('lammps_working/samples.lammpstrj',inv_types)
                     ne = len(new_data)
-                    new_data = al_help.clean_well_separated_nanostructures(new_data, setup)
+                    new_data = al_help.clean_well_separated_nanostructures(new_data, 6.0) # should come from al_config in the feature
                     if len(new_data) < 0.1*ne:
                         print(f'MD iter {md_iter}: More than 90% of the structures were well separated! rescaling beta by 1.1 to avoid desorption or dissolution')
                         beta_sampling *= 1.1
@@ -593,7 +593,7 @@ class al_help():
         return new_beta_sampling
 
     @staticmethod
-    def MC_sample(data, setup, parsed_args, beta_sampling):
+    def MC_sample(data, setup, al_config):
         """Sample candidate configurations via Metropolis-Hastings Monte Carlo.
 
         Parameters
@@ -606,6 +606,8 @@ class al_help():
             Command-line arguments with `sigma` for perturbation.
         beta_sampling : float
             Inverse temperature for acceptance probability.
+        fixed_types : list
+            atom types that need to be fixed
 
         Returns
         -------
@@ -613,124 +615,138 @@ class al_help():
             `(candidate_data, beta_sampling)` - sampled candidates and beta.
         """
         
-        max_mc_steps = 40000
-        max_candidates_per_system = 40000
-        
+        max_mc_steps = al_config.max_mc_steps
+        max_candidates_per_system = al_config.max_candidates_per_system
+        number_of_data_per_step = al_config.number_of_data_per_step   
+        asymptotic_steps = al_config.mc_asymptotic_steps
+        fixed_types = al_config.fixed_types
+        pta, ptwh, prwh = al_config.translate_atoms, al_config.translate_whole, al_config.rotate_whole
+
+
+        print(f'prob to deform = {pta:4.3f}, prob to trans = {ptwh:4.3f} , prob to rot = {prwh:4.3f}')
+
         kB = 0.0019872037514523
         
-        sigma_init = parsed_args.sigma
-        
+        sigma_init = al_config.sigma_init
+        beta_sampling = 1.0/(kB*al_config.target_temperature)
+
         c = copy.deepcopy(data['coords'].to_numpy())
         
-        init_data = copy.deepcopy(data[['at_type','sys_name','natoms','coords', 'bodies']])
+        # Preserve lattice column if it exists
+        cols_to_keep = ['at_type','sys_name','natoms','coords', 'bodies']
+        if 'lattice' in data.columns:
+            cols_to_keep.append('lattice')
+        init_data = copy.deepcopy(data[cols_to_keep])
         init_data['coords'] = c
         systems = np.unique(init_data['sys_name'])
         
-        asymptotic_steps = 100
         candidate_data = pd.DataFrame()
         
         for sysname in systems:
             
+            # get all the data for this system
+
             sys_data = init_data [ init_data['sys_name'] == sysname]
             
+            # get a copy of all the system data 
             step_data = copy.deepcopy(sys_data)
             
+            # evaluate the potential
             al_help.evaluate_potential(step_data, setup,'opt')
             Uclass = step_data['Uclass'].to_numpy().copy()
             
-            bs = setup.bS
-
+            # select based on propability initial configurations to initiate the MC moves
             prop_sel = np.exp( - (Uclass - Uclass.min())*beta_sampling )
             prop_sel /= prop_sel.sum()
 
             all_indexes = np.array(step_data.index)
             try:
-                idx_chosen = np.random.choice(all_indexes, size= min(len(step_data),100) , replace=False, p = prop_sel)
+                idx_chosen = np.random.choice(all_indexes, size= min(len(step_data) , number_of_data_per_step) , replace=False, p = prop_sel)
             except ValueError:
-                idx_chosen = np.random.choice(all_indexes, size= min(len(step_data),100) , replace=False, p = None)
+                idx_chosen = np.random.choice(all_indexes, size= min(len(step_data) , number_of_data_per_step) , replace=False, p = None)
             
+            # select a subset of initial data (number_of_data_per_step)
             step_data = step_data.loc[idx_chosen]
-
+            
+            # evaluate previouss step
             al_help.evaluate_potential(step_data, setup,'opt')
             Uclass_prev = step_data['Uclass'].to_numpy().copy()
             
             n = len(step_data)
+            print(f'Number of initial data = {n}') 
+            # initialize mc parameters
+            step, c_size ,  sigma, sum_accept_ratio, AR = 0, 0 , sigma_init, 0.0, 0.0
+            at_types = step_data['at_type'].iloc[0]
             
-            step, c_size ,  sigma, avg_accept_ratio, AR = 0, 0 , sigma_init, 0.0, 0.0
             candidate_data_sys = pd.DataFrame()
-            
+
             while(step <= max_mc_steps and c_size <= max_candidates_per_system):
-            
-                all_new_coords = []
-                old_coords = copy.deepcopy(step_data['coords'].to_numpy())
-                for j,dat in step_data.iterrows():
-                    new_coords = al_help.petrube_coords(np.array(dat['coords']) ,sigma, 'random_walk', dat['bodies'])
-                    all_new_coords.append(new_coords)
+                # get new corods via random walk
+                old_coords = copy.deepcopy(step_data['coords'].to_numpy().copy())
+                all_new_coords = al_help.random_walk_multiple(old_coords, sigma, at_types, fixed_types,
+                                                                pta, ptwh, prwh)
+                # set all new coords
                 step_data.loc[step_data.index,'coords'] = all_new_coords
-                 
+                
+                # evaluate potential
                 al_help.evaluate_potential(step_data, setup,'opt')
                  
                 Uclass_new = step_data['Uclass'].to_numpy()
                 
-                beta_anneal = max( beta_sampling, max_candidates_per_system/(2*(c_size+n)) * beta_sampling )
-                dubt = (Uclass_new  - Uclass_prev )*beta_anneal
+                # accept_prop
+                dubt = (Uclass_new  - Uclass_prev )*beta_sampling
                  
                 pe =  np.exp( - dubt ) 
+                
+                # accept or reject
                 accepted_filter = pe > np.random.uniform(0,1,n) 
-            
-             
                 not_accepted_filter = np.logical_not(accepted_filter)
+                
+                # set rejected to step_data
                 step_data.loc[ not_accepted_filter, 'coords']  = old_coords[not_accepted_filter]
-                 
+                
+                # set to previous
                 Uclass_prev [ accepted_filter ] = Uclass_new [accepted_filter].copy()
                 Uclass_prev [ not_accepted_filter ] =  Uclass_prev [ not_accepted_filter].copy()
                 
-                accept_ratio = np.count_nonzero(accepted_filter)/n
-                avg_accept_ratio += accept_ratio
+                # acceptance ratio
+                current_accept_ratio = np.count_nonzero(accepted_filter)/n
+                sum_accept_ratio += current_accept_ratio
             
-
-                if step %200  ==0:
-                    print( 'MC step {:d}, beta_anneal = {:.4e} ,   sigma = {:.4e} A ,  accept_ratio = {:5.4f}  ,  current_accept = {:5.4f} candidate size = {:d}'.format(step, beta_anneal,  sigma, AR, accept_ratio, c_size) )
+                if step %1  ==0:
+                    print( f'MC step {step:d}, beta_sampling = {beta_sampling:.4e} ,   sigma = {sigma:.4e} A ,  accept_ratio = {AR:5.4f}  ,  current_accept = {current_accept_ratio:5.4f} candidate size = {c_size:d}' )
                     sys.stdout.flush()
             
                 step += 1
-                
+
+                # autotune accept ratio
                 if step < asymptotic_steps:
                     continue
-                AR = avg_accept_ratio/step
+                AR = sum_accept_ratio/step
                 if AR < 0.2:
                      sigma*=0.99
                 elif AR > 0.5:
                      sigma/=0.99
                 sigma  = min( max(sigma,sigma_init*1e-1) , sigma_init*1e1)
                 
-                filtered_step_data = step_data[ accepted_filter ]
+                # append the accepted step_data
+                accepted_step_data = step_data[ accepted_filter ]
                 
-                candidate_data_sys = pd.concat( (candidate_data_sys, filtered_step_data), ignore_index=True)
+                candidate_data_sys = pd.concat( (candidate_data_sys, accepted_step_data), ignore_index=True)
                 
                 c_size = len(candidate_data_sys)
                 ########
 
 
-            print('Metropolis Hastings completed! Average acceptance {:5.4f}'.format( AR ) ) 
+            print(f'Metropolis Hastings for {sysname} completed! Average acceptance {AR:5.4f}' ) 
 
-            u = candidate_data_sys['Uclass'].to_numpy()
-
-            tfit, beta_eff, alpha, weights, l_minima, fail = al_help.estimate_Teff_Beff(u,  nbins = 200) 
-            
-            print('Candidate distribution MC:    beta_eff = {:5.4f}  ,  beta_sampling = {:5.4f}'.format ( beta_eff, beta_sampling) )
-            
-            al_help.plot_candidate_distribution(u - u.min(), (beta_eff, alpha, weights, l_minima), 200,
-                        title = f'MC trial' + r': Candidate distribution $\beta_{eff}$' + ' = {:5.4f}'.format( beta_eff) + r' $\beta_{sampling}$' + ' = {:5.4f}'.format( beta_sampling),
-                        fname=f'{setup.runpath}/CD_{sysname}.png')
-            
             
             candidate_data = candidate_data.append(candidate_data_sys,ignore_index=True)
 
         print('Metropolis Hastings completed! Average acceptance {:5.4f}'.format( c_size/(n*(step) ) ) )
         
         #raise  Exception('Debuging. Want to stop here')
-        return candidate_data , beta_sampling
+        return candidate_data 
 
     @staticmethod
     def plot_candidate_distribution(u, fitting_params, bins, title = '', fname=None):
@@ -1096,7 +1112,7 @@ class al_help():
         return
     
     @staticmethod
-    def evaluate_potential(data,setup, which='init'):
+    def evaluate_potential(data, setup, which='init'):
         """Evaluate the current force-field model on a dataset without optimization.
 
         Parameters
@@ -1113,7 +1129,7 @@ class al_help():
         FF_Optimizer
             Optimizer instance with predictions computed.
         """
-        al_help.make_interactions(data,setup)
+        al_help.make_interactions(data, setup)
         
         
         #train_indexes, dev_indexes = Data_Manager(data,setup).train_development_split()
@@ -1703,8 +1719,12 @@ class al_help():
             files = [f for f in os.listdir(path) if f.endswith('.ffdata') or f.endswith('.xyz')]
         
         for fname in files:
-            df = Data_Manager.read_xyz('{:s}/{:s}'.format(path, fname))
-            data = pd.concat([data, df], ignore_index=True)
+            try:
+                df = Data_Manager.read_xyz('{:s}/{:s}'.format(path, fname))
+                data = pd.concat([data, df], ignore_index=True)
+            except (UnicodeDecodeError, ValueError) as e:
+                print(f"Warning: Could not read {fname}: {e}")
+                continue
         return data
     
 
@@ -1862,6 +1882,68 @@ class al_help():
         return candidate_data
     
     @staticmethod
+    def random_walk_vectorized(old_data_coords, sigma, at_types, fixed_types=[],
+                                translate_atoms=1.0, translate_whole=0.0, rotate_whole=0.0):
+        """Apply random perturbations to atomic coordinates.
+
+        Parameters
+        ----------
+        coords : object containing the coords of each point
+            
+        sigma : float
+        Returns
+        -------
+        numpy.ndarray
+            Perturbed coordinates.
+        """
+        n = len(old_data_coords)
+        trans_at_p = np.random.uniform (0, 1.0, n)
+        trans_wh_p = np.random.uniform (0, 1.0, n)
+        rot_wh_p = np.random.uniform (0, 1.0, n)
+        
+        # vectorize the coords
+        to_config_low_index = []
+        to_config_up_index = []
+        vec_coords = [ ]
+        ntot = 0
+        for c in old_data_coords:
+            na = len(c)
+            to_config_low_index.append(ntot)
+            to_config_up_index.append(ntot + na)
+            vec_coords.extend(c)
+
+            ntot+=na
+
+        vec_coords = np.array(vec_coords)
+        to_config_low_index =  np.array(to_config_low_index)
+        to_config_up_index =  np.array(to_config_up_index)
+        
+        # select indexes to translate
+        idx_move = []
+        not_fixed = [j for j, at in enumerate(at_types) if at not in fixed_types ]
+        
+        ntot= 0
+        for j,c in enumerate(old_data_coords,prob_to_act):
+            na = len(c)
+            if trans_at_p[j] < translate_atoms:
+                idx = np.random.choice(not_fixed)
+                idx_move.append(idx +ntot)
+
+            ntot+=na
+        idx_move = np.array(idx_move)
+
+        #assert  vec_coords.shape == (ntot, 3) , 'shape of vec_coords is wrong '
+        #assert  idx_move.shape == (len(old_data_coords), ) , 'shape of idx_move is wrong '
+        #assert  to_config_low_index.shape == (len(old_data_coords), ) , 'shape of to_config_low_index is wrong '
+        #assert  to_config_up_index.shape == (len(old_data_coords), ) , 'shape of to_config_up_index is wrong '
+        
+        r_move =  np.random.normal(0 , sigma,(len(idx_move), 3) )
+        vec_coords[idx_move] += r_move
+        
+        new_coords = [list(vec_coords[l:u]) for l, u in zip(to_config_low_index, to_config_up_index) ]
+        return new_coords
+    
+    @staticmethod
     def petrube_coords(coords,sigma, method, bodies = {} ):
         """Apply random perturbations to atomic coordinates.
 
@@ -1909,6 +1991,109 @@ class al_help():
         return cc
 
     @staticmethod
+    def rotate_around_centroid(coords, angles):
+        """Rotate coordinates around their centroid.
+        
+        Parameters
+        ----------
+        coords : numpy.ndarray
+            Nx3 array of atomic coordinates to rotate.
+        angles : tuple or array-like
+            (angle_x, angle_y, angle_z) rotation angles in radians.
+            
+        Returns
+        -------
+        numpy.ndarray
+            Rotated coordinates.
+        """
+        centroid = coords.mean(axis=0)
+        centered = coords - centroid
+        rotated = GeometryTransformations.rotate_coordinates(centered, *angles)
+        return rotated + centroid
+    
+    @staticmethod
+    def random_rotation_angles(sigma):
+        """Generate random rotation angles based on sigma.
+        
+        Parameters
+        ----------
+        sigma : float
+            Standard deviation for angle generation. Angles are 2*sigma in magnitude.
+            
+        Returns
+        -------
+        numpy.ndarray
+            Array of 3 rotation angles (x, y, z) in radians.
+        """
+        return np.random.normal(0, 2 * sigma, 3)
+    
+    @staticmethod
+    def random_walk_multiple(old_coords, sigma, at_types, fixed_types=[],
+                             p_translate_atoms=1.0, p_translate_whole=0.0, p_rotate_whole=0.0):
+        """Apply random perturbation to coordinates based on move type probabilities.
+        
+        Randomly selects one of three operations based on probabilities:
+        - translate_atoms: translate a single random atom from not_fixed
+        - translate_whole: translate all not_fixed atoms by same random vector
+        - rotate_whole: rotate all not_fixed atoms around their centroid
+        
+        Parameters
+        ----------
+        old_coords : numpy.ndarray
+            Nconfig,[Nx3] object of atomic coordinates.
+        sigma : float
+            Standard deviation for translations. Rotation angles use 2*sigma.
+        at_types : list
+            List of atom types for each atom.
+        fixed_types : list
+            Atom types that should not be moved.
+        p_translate_atoms : float
+            Probability of translating a single atom (default 0.2).
+        p_translate_whole : float
+            Probability of translating all movable atoms (default 0.3).
+        p_rotate_whole : float
+            Probability of rotating all movable atoms (default 0.5).
+            
+        Returns
+        -------
+        numpy.ndarray
+            New coordinates after perturbation.
+        """
+    
+        # Get indices of atoms that can move
+        not_fixed = np.array([j for j, at in enumerate(at_types) if at not in fixed_types], dtype=np.int64)
+        
+        if len(not_fixed) == 0:
+            return old_coords.copy()
+
+        nconfig = len(old_coords)    
+        old_coords = copy.deepcopy(old_coords)
+        
+        # Choose operation based on probabilities
+        ta  = np.random.uniform(0.0, 1.0, nconfig) < p_translate_atoms
+        twh = np.random.uniform(0.0, 1.0, nconfig) < p_translate_whole
+        rwh = np.random.uniform(0.0, 1.0, nconfig) < p_rotate_whole
+        new_coords = [ ]
+        for j, coords in enumerate(old_coords):
+            c = np.array(coords)
+            if ta[j]:
+                # Translate a single random atom
+                idx = np.random.choice(not_fixed)
+                displacement = np.random.normal(0, sigma, 3)
+                c[idx] += displacement
+            if twh[j]:
+                # Translate all not fixed
+                displacement = np.random.normal(0, sigma, 3)
+                c[not_fixed,:] += displacement
+            if rwh[j]:
+                angles = al_help.random_rotation_angles(sigma)
+                movable_coords = c[not_fixed,:]
+                rotated = al_help.rotate_around_centroid(movable_coords, angles)
+                c[not_fixed, :] = rotated
+            new_coords.append(list(c))
+        return new_coords
+
+    @staticmethod
     def similarity_vector(dval):
         """Flatten descriptor values into a sorted vector for similarity comparison."""
         vec = []
@@ -1925,7 +2110,7 @@ class al_help():
 
 
     @staticmethod
-    def find_histogram_uncertainty( candidate_data, existing_data,  setup):
+    def find_histogram_uncertainty( candidate_data, existing_data,  setup, fixed_types=[]):
         """Compute uncertainty scores for candidates based on descriptor histograms.
 
         For each candidate, measures how much its descriptor values overlap
@@ -1959,6 +2144,8 @@ class al_help():
         histograms = dict()
         for model in setup.opt_models.values():
             ty = model.type
+            if np.array( [t in fixed_types for t in ty] ).all():
+                continue
             fe = model.feature
             dd = man_ex.get_distribution(ty, fe)
 
@@ -2002,19 +2189,17 @@ class al_help():
 
 
     @staticmethod
-    def random_selection(existing_data , setup,candidate_data, batchsize, method='histogram_uncertainty'):
+    def random_selection(existing_data ,candidate_data,setup, al_config,  method='histogram_uncertainty'):
         """Select a batch of candidates using random or energy-controlled sampling.
 
         Parameters
         ----------
         data : pandas.DataFrame
             Current training dataset (used for system proportions).
-        setup : Setup_Interfacial_Optimization
-            Configuration with `bS` for Boltzmann selection.
         candidate_data : pandas.DataFrame
             Pool of candidate configurations.
-        batchsize : int
-            Number of configurations to select.
+        setup : Setup_Interfacial_Optimization
+        al_config : active learning configuration object
         method : str
             Selection method: `'random'`, `'control_energy'`, or
             `'histogram_uncertainty'`.
@@ -2024,9 +2209,11 @@ class al_help():
         pandas.DataFrame
             Selected configurations.
         """
-        al_help.make_interactions(candidate_data,setup) 
-        #candidate_data = al_help.clean_well_separated_nanostructures(candidate_data,setup)
+        batchsize = al_config.batch_size
+        fixed_types = al_config.fixed_types
         
+        al_help.make_interactions(candidate_data,setup) 
+
         Ucls = candidate_data['Uclass'].to_numpy()
         n = len(candidate_data)
         
@@ -2070,7 +2257,8 @@ class al_help():
                 psel = np.exp (- (u_f - u_f.min())/setup.bS)
                 psel /= psel.sum()
             elif method == 'histogram_uncertainty':
-                uncertainty_norm, uncertainty = al_help.find_histogram_uncertainty(candidate_data [fsystem], existing_data[fex]  , setup )
+                uncertainty_norm, uncertainty = al_help.find_histogram_uncertainty(candidate_data [fsystem], existing_data[fex]  , 
+                                                                                    setup, fixed_types )
                 psel = (1.0-zu) * uncertainty_norm + zu * np.random.uniform(0,1, size=uncertainty_norm.shape[0])
                 #psel = uncertainty.copy()
                 psel /= psel.sum()
@@ -2142,7 +2330,7 @@ class al_help():
             Selected configurations.
         """
         al_help.make_interactions(candidate_data,setup) 
-        candidate_data = al_help.clean_well_separated_nanostructures(candidate_data,setup)
+        candidate_data = al_help.clean_well_separated_nanostructures(candidate_data, 6.0)
         dis = []
         for k1,d1 in candidate_data.iterrows():
             disim = 0
@@ -2389,7 +2577,8 @@ class al_help():
             file_ext = '.log'
             read_func = lambda fpath: Data_Manager.read_Gaussian_output(fpath, read_forces=read_forces)
         elif dft_software.lower() in ['qespresso', 'qe', 'quantum_espresso']:
-            file_ext = '.out'
+            file_ext = '.log'
+            print('I am in the function log_to_ffdata looking for QE files')
             read_func = lambda fpath: al_help._read_qe_output_to_df(fpath, read_forces=read_forces)
         else:
             raise ValueError(f"Unknown DFT software: {dft_software}. Use 'gaussian' or 'qespresso'.")
@@ -2406,7 +2595,7 @@ class al_help():
                 print('warning: DFT null data --> {}'.format(ve))
                 continue
          
-            labels = [c for c in data.columns if c not in ['coords', 'natoms', 'at_type', 'filename', 'Forces']]
+            labels = [c for c in data.columns if c not in ['coords', 'natoms', 'at_type', 'filename', 'Forces', 'lattice']]
             base_name = fname.rsplit('.', 1)[0]
             Data_Manager.save_selected_data('{:s}/{:s}.ffdata'.format(output_path, base_name), data, labels=labels)
         return
@@ -2447,6 +2636,7 @@ class al_help():
         -------
         pd.DataFrame
             DataFrame with coords, at_type, Energy, natoms, and optionally Forces.
+            Also includes QE metrics: energy_error, gradient_error, scf_correction.
         """
         try:
             import qe_io
@@ -2465,10 +2655,26 @@ class al_help():
         if not energies:
             raise ValueError(f"No converged energies found in {filepath}")
         
+        # Extract lattice parameters
+        lattice = qe_io.extract_lattice_params(lines)
+        # Handle case where lattice is a single (3,3) array - replicate for all configs
+        if isinstance(lattice, np.ndarray) and lattice.shape == (3, 3):
+            lattice_list = [lattice] * len(energies)
+        elif isinstance(lattice, list):
+            lattice_list = lattice
+        else:
+            lattice_list = [lattice] * len(energies)
+        
         # Extract forces if requested
         forces_list = []
         if read_forces:
             forces_list = qe_io.extract_forces(lines)
+        
+        # Extract QE error metrics
+        errors = qe_io.extract_errors(lines)
+        energy_errors = errors.get('energy_error', [])
+        gradient_errors = errors.get('gradient_error', [])
+        scf_corrections = errors.get('scf_correction', [])
         
         # Match data lengths
         n_configs = min(len(at_types_list), len(coords_list), len(energies))
@@ -2477,14 +2683,43 @@ class al_help():
         if len(forces_list) < n_configs:
             forces_list = forces_list + [None] * (n_configs - len(forces_list))
         
+        # Handle error metrics - may have fewer entries, pad with NaN
+        def pad_array(arr, target_len):
+            arr = list(arr) if hasattr(arr, '__iter__') else []
+            if len(arr) < target_len:
+                arr = arr + [np.nan] * (target_len - len(arr))
+            return arr[:target_len]
+        
+        energy_errors = pad_array(energy_errors, n_configs)
+        gradient_errors = pad_array(gradient_errors, n_configs)
+        scf_corrections = pad_array(scf_corrections, n_configs)
+        
+        # Pad lattice_list if needed
+        if len(lattice_list) < n_configs:
+            # Use last lattice for remaining configs
+            last_lattice = lattice_list[-1] if lattice_list else None
+            lattice_list = lattice_list + [last_lattice] * (n_configs - len(lattice_list))
+        
         data_rows = []
         for i in range(n_configs):
+            # find a sys_name based on stoichiometry
+            ats = np.array(at_types_list[i])
+            u = np.unique(ats)
+            nums = {x:np.count_nonzero( ats == x) for x in u}
+            sys_name = ''.join([str(k) + str(v) for k,v in nums.items()])
+            #########
+
             row = {
                 'at_type': list(at_types_list[i]),
                 'coords': coords_list[i],
                 'Energy': energies[i],
                 'natoms': len(at_types_list[i]),
                 'filename': filepath,
+                'energy_error': energy_errors[i],
+                'gradient_error': gradient_errors[i],
+                'scf_correction': scf_corrections[i],
+                'sys_name':sys_name,
+                'lattice': lattice_list[i],
             }
             if read_forces and forces_list[i] is not None:
                 row['Forces'] = forces_list[i]
@@ -2682,23 +2917,24 @@ class al_help():
         for i in range(c1.shape[0]):
             for j in range(c2.shape[0]):
                 r = c1[i] - c2[j]
-                d = np.dot(r,r)**0.5
-                if d <dmin:
+                d = np.dot(r , r)**0.5
+                if d < dmin:
                     dmin = d
         return dmin
+    
     @staticmethod
-    def clean_well_separated_nanostructures(data, setup):
+    def clean_well_separated_nanostructures(data, rc):
         """Remove configurations that are split into disconnected clusters.
 
         Keeps only rows where all atoms are connected through a neighbor graph
-        defined by the cutoff `setup.rclean`.
+        defined by the cutoff `rc`.
 
         Parameters
         ----------
         data : pandas.DataFrame
             Dataset with at least `coords` and `natoms`.
-        setup : Setup_Interfacial_Optimization
-            Provides `rclean` (distance cutoff in Angstrom).
+        rc : float
+            Distance cutoff in Angstrom for neighbor detection.
 
         Returns
         -------
@@ -2706,7 +2942,6 @@ class al_help():
             Filtered view of the input DataFrame.
         """
         t0 = perf_counter()
-        rc = setup.rclean
         keep_index = []
     
         for j, df in data.iterrows():
@@ -2774,7 +3009,6 @@ class al_help():
         pe = np.exp(-re / beta_sampling)
         if n > 200:
             indexes = data.index
-            #ix = np.random.choice(data.index,int(setup.clean_perc*n),replace=False,p=ps)
             ix = []
             for i,p in enumerate(pe):
                 if  re[i] < e_range:
@@ -4831,12 +5065,8 @@ class Setup_Interfacial_Optimization():
         'storing_path':'Results',
         'run': '0',
         'runpath_attributes':['run'],
-        
-        'max_ener':1.0,
+     
         'force_importance':1.0,
-        'rclean':6.0,
-        'max_force':0.003,
-        'clean_perc':0.8,
         'bC':50.0,
         'bS':20.0,
         
@@ -4910,14 +5140,18 @@ class Setup_Interfacial_Optimization():
     executes = ['distance_map','reference_energy','struct_types','rigid_types',
             'lammps_potential_extra_lines','extra_pair_coeff','not_optimize_force_for']
     
-    def __init__(self,fname):
+    def __init__(self, methodology_file, potential_file=None):
         '''
         A Constructor of the setup of Interfacial Optimization
         
         Parameters
         ----------
-        fname : string
-            File to read the setup.
+        methodology_file : string
+            File containing methodology/training parameters.
+            For backward compatibility, can also be a combined file.
+        potential_file : string, optional
+            File containing potential model definitions (sections with & and /).
+            If None, assumes methodology_file contains both sections (legacy mode).
         Raises
         ------
         Exception
@@ -4928,90 +5162,109 @@ class Setup_Interfacial_Optimization():
         None.        
         '''
         
-        #print('setting algorithm from file "{:s}"'.format(fname))
-        def my_setattr(self,attrname,val,defaults):
+        def my_setattr(self, attrname, val, defaults):
             if attrname not in defaults:
                 raise Exception('InputError: Uknown input variable "{:s}"'.format(attrname))
             ty = type(defaults[attrname])
             if ty is list or ty is tuple:
-                
                 tyi = type(defaults[attrname][0])
                 attr = ty([tyi(v) for v in val])
             else:
                 attr = ty(val)
-            setattr(self,attrname,attr)
-
+            setattr(self, attrname, attr)
             return
-        # Defaults
-
         
         defaults = self.defaults
         
-        with open(fname,'r') as f:
-            lines = f.readlines() 
-            f.closed
+        # Read methodology file
+        with open(methodology_file, 'r') as f:
+            methodology_lines = f.readlines()
         
-        #strip comments
-        for j,line in enumerate(lines):
-            for i,s in enumerate(line):
-                if '#' == s: 
-                    lines[j]=lines[j][:i]+'\n'
-                lines[j] = lines[j].strip()
-                
+        # Strip comments and whitespace
+        for j, line in enumerate(methodology_lines):
+            for i, s in enumerate(line):
+                if '#' == s:
+                    methodology_lines[j] = methodology_lines[j][:i] + '\n'
+            methodology_lines[j] = methodology_lines[j].strip()
+        
+        # Check if potential_file is provided or if we're in legacy mode
+        if potential_file is None:
+            # Legacy mode: methodology_file contains everything
+            all_lines = methodology_lines
+            potential_lines = methodology_lines
+        else:
+            # New modular mode: read potential file separately
+            with open(potential_file, 'r') as f:
+                potential_lines = f.readlines()
+            for j, line in enumerate(potential_lines):
+                for i, s in enumerate(line):
+                    if '#' == s:
+                        potential_lines[j] = potential_lines[j][:i] + '\n'
+                potential_lines[j] = potential_lines[j].strip()
+            all_lines = methodology_lines
+        
+        # Find section lines (model definitions starting with &)
         section_lines = dict()
-        for j,line in enumerate(lines):
+        for j, line in enumerate(potential_lines):
             if '&' in line:
                 section_lines[line.split('&')[-1].strip()] = j
         
-        #get_attributes
-        for j,line in enumerate(lines):
-            
+        # Get methodology attributes (key-value pairs before & sections)
+        for j, line in enumerate(all_lines):
             if '&' in line:
-                break 
+                break
             
             if '=' in line:
                 li = line.split('=')
-                var = li[0].strip() ; value = li[1].strip()
+                var = li[0].strip()
+                value = li[1].strip()
                 if value.isdigit():
                     value = int(value)
-                elif value.replace('.','',1).isdigit():
+                elif value.replace('.', '', 1).isdigit():
                     value = float(value)
                 elif var in self.executes:
                     value = str(value)
-                   #print(var,'=',value)
             elif ':' in line:
                 li = line.split(':')
-                var = li[0].strip() ; value = [] 
+                var = li[0].strip()
+                value = []
                 for x in li[1].split():
-                    if x.isdigit(): y = int(x)
-                    elif x.replace('.','',1).isdigit(): y = float(x)
-                    else: y = x
+                    if x.isdigit():
+                        y = int(x)
+                    elif x.replace('.', '', 1).isdigit():
+                        y = float(x)
+                    else:
+                        y = x
                     value.append(y)
             else:
                 continue
-   
-            my_setattr(self,var,value,defaults)
             
-        for atname,de in defaults.items():
-            if not hasattr(self,atname):
-                setattr(self,atname,de)
-        #Get initial conditions
+            my_setattr(self, var, value, defaults)
+        
+        # Set defaults for missing attributes
+        for atname, de in defaults.items():
+            if not hasattr(self, atname):
+                setattr(self, atname, de)
+        
+        # Get initial model conditions from potential file
         models = dict()
-        for key,sl in section_lines.items():
+        for key, sl in section_lines.items():
             name = key
-            #print(name)
-            obj = self.model_interaction(lines[sl:],key)
-            attrname = 'init' +name 
-            setattr(self,attrname,obj)
+            obj = self.model_interaction(potential_lines[sl:], key)
+            attrname = 'init' + name
+            setattr(self, attrname, obj)
             models[name] = obj
         self.init_models = models
         self.nonchanging_init_models = copy.deepcopy(models)
-        #execute the string related commands
+        
+        # Execute the string related commands
         for e in self.executes:
-            #print(e)
-            exec_string = "setattr(self,e, {:})".format(getattr(self,e))
-            #print(exec_string)
+            exec_string = "setattr(self,e, {:})".format(getattr(self, e))
             exec(exec_string)
+        
+        # Store file paths for writing back
+        self._methodology_file = methodology_file
+        self._potential_file = potential_file
         return 
 
     def excess_model(self,cat,num):
@@ -5213,7 +5466,7 @@ class Setup_Interfacial_Optimization():
             self.category = prefix.split()[0][:2]
             self.num = int(prefix[2])
             
-            if self.category in ['PW',]:
+            if self.category in ['PW', 'BO']:
                 inter = self.sort_type(inter)
             else:
                 inter = tuple(inter)
@@ -5324,19 +5577,26 @@ class Setup_Interfacial_Optimization():
         return r
     
 
-    def write_running_output(self):
-        """Write the current configuration to a `.in` file for reproducibility."""
+    def write_running_output(self, separate_files=True):
+        """Write the current configuration to input files for reproducibility.
+        
+        Parameters
+        ----------
+        separate_files : bool
+            If True, writes methodology.in and potential.in separately.
+            If False, writes combined runned.in (legacy mode).
+        """
 
-        def type_var(v,ti,s):
-            if ti is int: s+='{:d} '.format(v)
-            elif ti is str: s+='{:s} '.format(v)
-            elif ti is float: s+='{:7.8f} '.format(v)
+        def type_var(v, ti, s):
+            if ti is int: s += '{:d} '.format(v)
+            elif ti is str: s += '{:s} '.format(v)
+            elif ti is float: s += '{:7.8f} '.format(v)
             elif ti is bool:
-                if v: s+='1 ' 
-                else: s+='0 '
+                if v: s += '1 '
+                else: s += '0 '
             return s
 
-        def write(file,name,var):
+        def write(file, name, var):
             s = '{:15s}'.format(name)
             t = type(var)
 
@@ -5344,43 +5604,64 @@ class Setup_Interfacial_Optimization():
                 try:
                     ti = type(var[0])
                 except IndexError:
-                    s+= ' : '
+                    s += ' : '
                 else:
-                    s +=' : '
+                    s += ' : '
                     for v in var:
-                        s = type_var(v,ti,s)
+                        s = type_var(v, ti, s)
             else:
-                s+= ' = '
-                s = type_var(var,t,s)
-            s+='\n'
+                s += ' = '
+                s = type_var(var, t, s)
+            s += '\n'
             
             file.write(s)
             return
         
-        fname = '{:s}/runned.in'.format(self.runpath)
-        with open(fname,'w') as file:
-            add_empty_line = ['runpath_attributes','bS','costf','lambda_force','normalize_data','reg_par',
-                              'tolerance','seed','recombination','visit','bT','nAN','rho_rc'] 
+        def write_methodology(file):
+            """Write methodology/training parameters."""
+            add_empty_line = ['runpath_attributes', 'bS', 'costf', 'lambda_force', 'normalize_data', 'reg_par',
+                              'tolerance', 'seed', 'recombination', 'visit', 'bT', 'nAN', 'rho_rc']
             
-            for i,(k,v) in enumerate(self.defaults.items()):
-                var = getattr(self,k)
+            for i, (k, v) in enumerate(self.defaults.items()):
+                var = getattr(self, k)
                 if k in self.executes:
                     var = str(var)
-                write(file,k,var)
-                if k in add_empty_line: 
+                write(file, k, var)
+                if k in add_empty_line:
                     file.write('\n')
             file.write('\n')
-            
-            for k,model in self.opt_models.items() :
+        
+        def write_potential(file):
+            """Write potential model definitions."""
+            for k, model in self.opt_models.items():
                 file.write('&{:s}\n'.format(k))
                 file.write('FUNC {:s}\n'.format(model.model))
-                for k,p in model.pinfo.items():
+                for k, p in model.pinfo.items():
                     file.write('{:10s} : {:14.13f}  {:d}  {:6.5f}  {:6.5f}    {:6.5f} \n'.format(
-                                    p.name, p.value, int(p.opt),p.low_bound, p.upper_bound,p.regul))
-                
+                                    p.name, p.value, int(p.opt), p.low_bound, p.upper_bound, p.regul))
                 file.write('/\n\n')
-                
-            file.closed
+        
+        if separate_files:
+            # Write methodology.in
+            methodology_fname = '{:s}/methodology.in'.format(self.runpath)
+            with open(methodology_fname, 'w') as file:
+                file.write('# Methodology/Training Parameters\n')
+                file.write('# Generated by FF_Develop\n\n')
+                write_methodology(file)
+            
+            # Write potential.in
+            potential_fname = '{:s}/potential.in'.format(self.runpath)
+            with open(potential_fname, 'w') as file:
+                file.write('# Potential Model Definitions\n')
+                file.write('# Generated by FF_Develop\n\n')
+                write_potential(file)
+        else:
+            # Legacy mode: write combined runned.in
+            fname = '{:s}/runned.in'.format(self.runpath)
+            with open(fname, 'w') as file:
+                write_methodology(file)
+                write_potential(file)
+        
         return
                     
     def __repr__(self):
@@ -6495,33 +6776,44 @@ class Data_Manager():
     
     @staticmethod
     def save_selected_data(fname,data,selector=dict(),labels=None):
-        """Save selected data to an XYZ file with optional labels in comments."""
+        """Save selected data to an XYZ file with optional labels in comments.
+        
+        Lattice vectors are stored in extended XYZ format: Lattice="a1x a1y a1z a2x a2y a2z a3x a3y a3z"
+        """
         if labels is not  None:
             for j,pars in data.iterrows():
                 comment = ' , '.join(['{:s}  = {:}'.format(lab, pars[lab]) for lab in labels])
                 data.loc[j,'comment'] = 'index = {} , '.format(j) + comment
         dataT = data[Data_Manager.data_filter(data,selector)]
         with open(fname,'w') as f:
-            for j,data in dataT.iterrows():
-                at = data['at_type']
-                ac = data['coords']
-                na = data['natoms']
+            for j,row in dataT.iterrows():
+                at = row['at_type']
+                ac = row['coords']
+                na = row['natoms']
                 try:
-                    fa = data['Forces']
+                    fa = row['Forces']
                     fa_ex=True
                 except:
                     fa_ex=False
                 try:
-                    comment = data['comment']
+                    comment = row['comment']
                 except:
                     comment = ''
+                
+                # Add lattice to comment if available
+                if 'lattice' in row and row['lattice'] is not None:
+                    lat = np.array(row['lattice'])
+                    if lat.shape == (3, 3):
+                        lat_str = ' '.join([f'{v:.8f}' for v in lat.flatten()])
+                        comment = f'Lattice="{lat_str}" , ' + comment
+                
                 f.write('{:d} \n{:s}\n'.format(na,comment))
                 if fa_ex == False:
-                    for j in range(na):
-                        f.write('{:3s} \t {:8.8f} \t {:8.8f} \t {:8.8f}  \n'.format(at[j],ac[j][0],ac[j][1],ac[j][2]) )
+                    for k in range(na):
+                        f.write('{:3s} \t {:8.8f} \t {:8.8f} \t {:8.8f}  \n'.format(at[k],ac[k][0],ac[k][1],ac[k][2]) )
                 else:
-                    for j in range(na):
-                        f.write('{:3s} \t {:8.8f} \t {:8.8f} \t {:8.8f}  \t {:8.8f} \t {:8.8f} \t {:8.8f}\n'.format(at[j],ac[j][0],ac[j][1],ac[j][2], fa[j][0],fa[j][1],fa[j][2]) )
+                    for k in range(na):
+                        f.write('{:3s} \t {:8.8f} \t {:8.8f} \t {:8.8f}  \t {:8.8f} \t {:8.8f} \t {:8.8f}\n'.format(at[k],ac[k][0],ac[k][1],ac[k][2], fa[k][0],fa[k][1],fa[k][2]) )
             f.closed
             
         return 
@@ -6608,19 +6900,40 @@ class Data_Manager():
     @staticmethod
     def read_xyz(fname):
         """Read a single-frame XYZ file into a DataFrame."""
-        with open(fname) as f:
+        with open(fname, encoding='utf-8', errors='replace') as f:
             lines = f.readlines()
             f.closed
         return Data_Manager.lines_one_frame(lines)
     @staticmethod
     def lines_one_frame(lines):
-        """Parse lines from a single XYZ frame into a DataFrame."""
+        """Parse lines from a single XYZ frame into a DataFrame.
+        
+        Parses lattice from extended XYZ format: Lattice="a1x a1y a1z a2x a2y a2z a3x a3y a3z"
+        """
         lines = [line.strip('\n') for line in lines]
         na = int(lines[0])
         
         natoms = [na]
-        attrs = lines[1].split(',')
-        atr = {k.split('=')[0].strip() : k.split('=')[1].strip() for k in attrs}
+        comment_line = lines[1]
+        
+        # Extract lattice if present (extended XYZ format)
+        lattice = None
+        import re
+        lattice_match = re.search(r'Lattice="([^"]+)"', comment_line)
+        if lattice_match:
+            lat_values = [float(x) for x in lattice_match.group(1).split()]
+            if len(lat_values) == 9:
+                lattice = np.array(lat_values).reshape(3, 3)
+            # Remove Lattice from comment for further parsing
+            comment_line = re.sub(r'Lattice="[^"]+" , ', '', comment_line)
+        
+        attrs = comment_line.split(',')
+        atr = {}
+        for k in attrs:
+            if '=' in k:
+                key, val = k.split('=', 1)
+                atr[key.strip()] = val.strip()
+        
         newattr = dict()
         for k,v in atr.items():
             try:
@@ -6632,6 +6945,8 @@ class Data_Manager():
                     v1 = v
             newattr[k] = [v1]
         newattr['natoms'] = natoms
+        if lattice is not None:
+            newattr['lattice'] = [lattice]
         at_types = []
         coords= []
         forces=[]
@@ -7386,7 +7701,7 @@ class FF_Optimizer(Optimizer):
         i_index = model_info.i_indexes
         j_index = model_info.j_indexes
         #ntotal = number of forces
-        fg = - compute_obj.find_derivative_gradient() #shape = (npars, ntotal)
+        fg = compute_obj.find_derivative_gradient() #shape = (npars, ntotal)
         nf = fg.shape[1]
         if model_info.category == 'PW' or model_info.category == 'BO':
             for n in range(n_pars):
@@ -7429,7 +7744,7 @@ class FF_Optimizer(Optimizer):
         i_index = model_info.i_indexes
         j_index = model_info.j_indexes
        
-        dudx_vectorized = - compute_obj.find_dydx()
+        dudx_vectorized = compute_obj.find_dydx()
         dudx_vectorized = dudx_vectorized.reshape((dudx_vectorized.shape[0],1))
         
         if model_info.category == 'PW' or model_info.category == 'BO':
@@ -7721,11 +8036,11 @@ class FF_Optimizer(Optimizer):
                 if order==4:
                     for m in Forces_numerical.keys():
                         atom_index = atoms_to_modify[m]
-                        Forces_numerical[m][atom_index, dir_index] = - (-up2[m] + 8 * up1[m] - 8 * um1[m] + um2[m]) / (12 * epsilon)
+                        Forces_numerical[m][atom_index, dir_index] = (-up2[m] + 8 * up1[m] - 8 * um1[m] + um2[m]) / (12 * epsilon)
                 else:
                     for m in Forces_numerical.keys():
                         atom_index = atoms_to_modify[m]
-                        Forces_numerical[m][atom_index, dir_index] = - (up1[m] - um1[m]) / ( 2*epsilon)
+                        Forces_numerical[m][atom_index, dir_index] = (up1[m] - um1[m]) / ( 2*epsilon)
                 #if verbose:
                 #    print(f'Numerical Forces Calculated. Comparing direction {dir_index}...')
                 
