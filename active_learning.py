@@ -133,6 +133,12 @@ class ActiveLearningConfig(ConfigBase):
         'max_gradient_error': 1000.0,         # kcal/mol/Å - sanity check for extremely repulsive configs  
         'max_scf_correction': 0.5,            # kcal/mol/Å - maximum allowed SCF correction
         'forbidden_separation': 6.0,          # Å - cutoff for detecting disconnected clusters
+        # Langevin MD sampling parameters
+        'md_initial_configs': 10,             # number of initial configs to start MD from
+        'md_friction': 0.01,                  # friction coefficient (1/fs)
+        'md_timestep': 1.0,                   # timestep in fs
+        'md_integration_time': 1000.0,        # total integration time in fs
+        'md_sampling_time': 10.0,             # store configurations every this many fs
     }
     
     def __init__(self):
@@ -600,9 +606,7 @@ class ActiveLearningPipeline:
         if sampling_method == 'perturbation':
             candidate_data = self.al.make_random_petrubations(data, sigma=self.sigma)
         elif sampling_method == 'md':
-            candidate_data, self.beta_sampling = self.al.sample_via_lammps(
-                data, self.setup, args, self.beta_sampling
-            )
+            candidate_data = self._sample_via_langevin(data)
         elif sampling_method == 'mc':
             candidate_data  = self.al.MC_sample( data, self.setup, self.al_config )
             
@@ -626,6 +630,56 @@ class ActiveLearningPipeline:
         print(f'Selected {len(selected_data)} configurations')
         
         return selected_data
+    
+    def _sample_via_langevin(self, data):
+        """Sample configurations using internal Langevin dynamics.
+        
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Current training data to start MD from.
+            
+        Returns
+        -------
+        candidate_data : pd.DataFrame
+            Sampled configurations from MD trajectories.
+        """
+        # Parse mass map from config
+        mass_map = self._parse_map_string(self.al_config.mass_map)
+        
+        # Add default masses for common elements if not specified
+        default_masses = {
+            'H': 1.008, 'C': 12.011, 'N': 14.007, 'O': 15.999,
+            'S': 32.065, 'P': 30.974, 'F': 18.998, 'Cl': 35.453,
+            'Br': 79.904, 'I': 126.90, 'Si': 28.086, 'B': 10.811,
+            'Ag': 107.868, 'Au': 196.967, 'Cu': 63.546, 'Fe': 55.845,
+            'Zn': 65.38, 'Pt': 195.084, 'Pd': 106.42, 'Ni': 58.693,
+        }
+        for elem, mass in default_masses.items():
+            if elem not in mass_map:
+                mass_map[elem] = mass
+        
+        # Create Langevin dynamics integrator
+        langevin = LangevinDynamics(self.optimizer, self.al_config, mass_map)
+        
+        # Select initial configurations for MD
+        n_init = min(self.al_config.md_initial_configs, len(data))
+        init_data = data.sample(n=n_init).copy()
+        
+        # Ensure required columns exist
+        required_cols = ['coords', 'at_type', 'natoms']
+        for col in required_cols:
+            if col not in init_data.columns:
+                raise ValueError(f"Data missing required column: {col}")
+        
+        # Run Langevin dynamics
+        sampled_df = langevin.integrate(init_data, n_configs=n_init)
+        
+        # Convert to format expected by rest of pipeline
+        # Keep only columns needed for DFT preparation
+        candidate_data = sampled_df[['coords', 'at_type', 'natoms', 'lattice', 'sys_name']].copy()
+        
+        return candidate_data
     
     def prepare_dft(self, iteration, selected_data):
         """
@@ -1240,6 +1294,209 @@ alpha      : 2.0000000000000  1  0.00010  7.00000    0.00000
     print("  - al.in")
     print("  - scheduler.in")
     print("  - dft.in")
+
+
+class LangevinDynamics:
+    """Langevin dynamics integrator using BAOAB scheme.
+    
+    Integrates equations of motion with stochastic thermostat for sampling
+    configurations from the canonical ensemble.
+    
+    Parameters
+    ----------
+    optimizer : FF_Optimizer
+        Force field optimizer with trained models.
+    al_config : ActiveLearningConfig
+        Configuration containing MD parameters.
+    mass_map : dict
+        Mapping from atom type to mass in amu.
+    """
+    
+    # Conversion factors
+    KB_KCAL = 0.001987204  # Boltzmann constant in kcal/(mol·K)
+    AMU_TO_KCAL_FS2_A2 = 0.0004184  # 1 amu·Å²/fs² = 0.0004184 kcal/mol
+    
+    def __init__(self, optimizer, al_config, mass_map):
+        self.optimizer = optimizer
+        self.al_config = al_config
+        self.mass_map = mass_map
+        
+        # MD parameters
+        self.dt = al_config.md_timestep  # fs
+        self.friction = al_config.md_friction  # 1/fs
+        self.temperature = al_config.target_temperature  # K
+        self.integration_time = al_config.md_integration_time  # fs
+        self.sampling_time = al_config.md_sampling_time  # fs
+        
+        # Precompute BAOAB coefficients
+        gamma_dt = self.friction * self.dt
+        self.c1 = np.exp(-gamma_dt)  # velocity decay factor
+        self.c2 = np.sqrt(1.0 - self.c1**2)  # noise scaling
+        
+    def _get_masses(self, at_types):
+        """Get mass array from atom types."""
+        masses = np.array([self.mass_map.get(at, 1.0) for at in at_types])
+        return masses
+    
+    def _apply_pbc(self, coords, lattice):
+        """Wrap coordinates into primary cell using PBC."""
+        if lattice is None:
+            return coords
+        inv_lattice = np.linalg.inv(lattice)
+        # Convert to fractional
+        frac = np.dot(coords, inv_lattice)
+        # Wrap to [0, 1)
+        frac = frac - np.floor(frac)
+        # Convert back to Cartesian
+        return np.dot(frac, lattice)
+    
+    def _compute_forces(self, data, which='opt'):
+        """Compute forces for all configurations in data."""
+        models = getattr(self.optimizer.setup, which + '_models')
+        params, bounds, fixed_params, isnot_fixed, reguls = self.optimizer.get_parameter_info(models)
+        
+        # Rebuild interactions
+        ff.al_help.make_interactions(data, self.optimizer.setup)
+        
+        natoms_per_point = data['natoms'].to_numpy()
+        models_list_info = self.optimizer.get_list_of_model_information(models, 'all')
+        
+        Forces_tot = self.optimizer.computeForceClass(params, np.sum(natoms_per_point), models_list_info)
+        
+        # Split forces by configuration
+        forces_dict = {}
+        for m, model_info in enumerate(models_list_info):
+            nat_low = model_info.nat_low
+            nat_up = model_info.nat_up
+            break  # Only need first model_info for indexing
+        
+        offset = 0
+        for m, natoms in enumerate(natoms_per_point):
+            forces_dict[m] = Forces_tot[offset:offset + natoms]
+            offset += natoms
+            
+        return forces_dict
+    
+    def integrate(self, init_data, n_configs=None):
+        """Run Langevin dynamics and sample configurations.
+        
+        Parameters
+        ----------
+        init_data : pd.DataFrame
+            Initial configurations with columns: coords, at_type, natoms, lattice (optional).
+        n_configs : int, optional
+            Number of configs to start from. If None, use all.
+            
+        Returns
+        -------
+        sampled_configs : pd.DataFrame
+            Sampled configurations during integration.
+        """
+        import copy
+        
+        if n_configs is None:
+            n_configs = len(init_data)
+        else:
+            n_configs = min(n_configs, len(init_data))
+        
+        # Select initial configurations
+        data = init_data.iloc[:n_configs].copy()
+        data = data.reset_index(drop=True)
+        
+        # Initialize velocities from Maxwell-Boltzmann
+        velocities = {}
+        for idx in data.index:
+            at_types = data.loc[idx, 'at_type']
+            masses = self._get_masses(at_types)
+            natoms = len(at_types)
+            # v = sqrt(kT/m) * random_normal
+            sigma_v = np.sqrt(self.KB_KCAL * self.temperature / (masses * self.AMU_TO_KCAL_FS2_A2))
+            velocities[idx] = np.random.randn(natoms, 3) * sigma_v[:, np.newaxis]
+        
+        # Storage for sampled configurations
+        sampled_configs = []
+        
+        n_steps = int(self.integration_time / self.dt)
+        sample_interval = max(1, int(self.sampling_time / self.dt))
+        
+        print(f"Running Langevin dynamics: {n_steps} steps, dt={self.dt} fs, T={self.temperature} K")
+        print(f"Sampling every {sample_interval} steps ({self.sampling_time} fs)")
+        
+        # Compute initial forces
+        forces = self._compute_forces(data)
+        
+        for step in range(n_steps):
+            # BAOAB integrator
+            for idx in data.index:
+                coords = data.loc[idx, 'coords']
+                vel = velocities[idx]
+                force = forces[idx]
+                at_types = data.loc[idx, 'at_type']
+                masses = self._get_masses(at_types)
+                lattice = data.loc[idx, 'lattice'] if 'lattice' in data.columns else None
+                
+                # Mass array for vectorized ops
+                m_inv = 1.0 / (masses * self.AMU_TO_KCAL_FS2_A2)  # 1/(amu * conversion)
+                m_inv = m_inv[:, np.newaxis]
+                
+                # A: half kick
+                vel = vel + 0.5 * self.dt * force * m_inv
+                
+                # B: half drift
+                coords = coords + 0.5 * self.dt * vel
+                
+                # O: Ornstein-Uhlenbeck (thermostat)
+                sigma_v = np.sqrt(self.KB_KCAL * self.temperature / (masses * self.AMU_TO_KCAL_FS2_A2))
+                noise = np.random.randn(len(masses), 3) * sigma_v[:, np.newaxis]
+                vel = self.c1 * vel + self.c2 * noise
+                
+                # B: half drift
+                coords = coords + 0.5 * self.dt * vel
+                
+                # Apply PBC if lattice exists
+                if lattice is not None:
+                    coords = self._apply_pbc(coords, lattice)
+                
+                # Update data
+                data.at[idx, 'coords'] = coords
+                velocities[idx] = vel
+            
+            # Clear old interactions before recomputing forces
+            if 'descriptor_info' in data.columns:
+                data.drop(columns=['descriptor_info', 'interactions'], inplace=True, errors='ignore')
+            
+            # A: Compute new forces (after position update)
+            forces = self._compute_forces(data)
+            
+            # Final half kick
+            for idx in data.index:
+                vel = velocities[idx]
+                force = forces[idx]
+                at_types = data.loc[idx, 'at_type']
+                masses = self._get_masses(at_types)
+                m_inv = 1.0 / (masses * self.AMU_TO_KCAL_FS2_A2)
+                m_inv = m_inv[:, np.newaxis]
+                vel = vel + 0.5 * self.dt * force * m_inv
+                velocities[idx] = vel
+            
+            # Sample configurations
+            if (step + 1) % sample_interval == 0:
+                for idx in data.index:
+                    sampled_configs.append({
+                        'coords': copy.deepcopy(data.loc[idx, 'coords']),
+                        'at_type': data.loc[idx, 'at_type'],
+                        'natoms': data.loc[idx, 'natoms'],
+                        'lattice': data.loc[idx, 'lattice'] if 'lattice' in data.columns else None,
+                        'sys_name': data.loc[idx, 'sys_name'] if 'sys_name' in data.columns else f'md_{idx}',
+                        'step': step + 1,
+                        'time_fs': (step + 1) * self.dt,
+                    })
+                    
+            if (step + 1) % 100 == 0:
+                print(f"  Step {step + 1}/{n_steps}, sampled {len(sampled_configs)} configs")
+        
+        print(f"Langevin dynamics complete. Sampled {len(sampled_configs)} configurations.")
+        return pd.DataFrame(sampled_configs)
 
 
 def main():
