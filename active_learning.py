@@ -659,8 +659,9 @@ class ActiveLearningPipeline:
             if elem not in mass_map:
                 mass_map[elem] = mass
         
-        # Create Langevin dynamics integrator
-        langevin = LangevinDynamics(self.optimizer, self.al_config, mass_map)
+        # Create Langevin dynamics integrator with fixed atom types
+        fixed_types = self.al_config.fixed_types
+        langevin = LangevinDynamics(self.optimizer, self.al_config, mass_map, fixed_types)
         
         # Select initial configurations for MD
         n_init = min(self.al_config.md_initial_configs, len(data))
@@ -1310,16 +1311,19 @@ class LangevinDynamics:
         Configuration containing MD parameters.
     mass_map : dict
         Mapping from atom type to mass in amu.
+    fixed_types : list, optional
+        List of atom types to freeze during integration.
     """
     
     # Conversion factors
     KB_KCAL = 0.001987204  # Boltzmann constant in kcal/(mol·K)
     AMU_TO_KCAL_FS2_A2 = 0.0004184  # 1 amu·Å²/fs² = 0.0004184 kcal/mol
     
-    def __init__(self, optimizer, al_config, mass_map):
+    def __init__(self, optimizer, al_config, mass_map, fixed_types=None):
         self.optimizer = optimizer
         self.al_config = al_config
         self.mass_map = mass_map
+        self.fixed_types = fixed_types if fixed_types else []
         
         # MD parameters
         self.dt = al_config.md_timestep  # fs
@@ -1337,6 +1341,10 @@ class LangevinDynamics:
         """Get mass array from atom types."""
         masses = np.array([self.mass_map.get(at, 1.0) for at in at_types])
         return masses
+    
+    def _get_mobile_mask(self, at_types):
+        """Get boolean mask for mobile (non-frozen) atoms."""
+        return np.array([at not in self.fixed_types for at in at_types])
     
     def _apply_pbc(self, coords, lattice):
         """Wrap coordinates into primary cell using PBC."""
@@ -1403,15 +1411,26 @@ class LangevinDynamics:
         data = init_data.iloc[:n_configs].copy()
         data = data.reset_index(drop=True)
         
-        # Initialize velocities from Maxwell-Boltzmann
+        # Initialize velocities from Maxwell-Boltzmann (only for mobile atoms)
         velocities = {}
+        mobile_masks = {}
         for idx in data.index:
             at_types = data.loc[idx, 'at_type']
             masses = self._get_masses(at_types)
             natoms = len(at_types)
-            # v = sqrt(kT/m) * random_normal
+            mobile_mask = self._get_mobile_mask(at_types)
+            mobile_masks[idx] = mobile_mask
+            
+            # v = sqrt(kT/m) * random_normal, but zero for fixed atoms
             sigma_v = np.sqrt(self.KB_KCAL * self.temperature / (masses * self.AMU_TO_KCAL_FS2_A2))
-            velocities[idx] = np.random.randn(natoms, 3) * sigma_v[:, np.newaxis]
+            vel = np.random.randn(natoms, 3) * sigma_v[:, np.newaxis]
+            vel[~mobile_mask] = 0.0  # Zero velocity for fixed atoms
+            velocities[idx] = vel
+            
+        n_mobile = sum(mobile_masks[idx].sum() for idx in data.index)
+        n_fixed = sum((~mobile_masks[idx]).sum() for idx in data.index)
+        if n_fixed > 0:
+            print(f"  Fixed atoms: {n_fixed}, Mobile atoms: {n_mobile}")
         
         # Storage for sampled configurations
         sampled_configs = []
@@ -1428,30 +1447,31 @@ class LangevinDynamics:
         for step in range(n_steps):
             # BAOAB integrator
             for idx in data.index:
-                coords = data.loc[idx, 'coords']
-                vel = velocities[idx]
+                coords = data.loc[idx, 'coords'].copy()
+                vel = velocities[idx].copy()
                 force = forces[idx]
                 at_types = data.loc[idx, 'at_type']
                 masses = self._get_masses(at_types)
                 lattice = data.loc[idx, 'lattice'] if 'lattice' in data.columns else None
+                mobile = mobile_masks[idx]
                 
                 # Mass array for vectorized ops
                 m_inv = 1.0 / (masses * self.AMU_TO_KCAL_FS2_A2)  # 1/(amu * conversion)
                 m_inv = m_inv[:, np.newaxis]
                 
-                # A: half kick
-                vel = vel + 0.5 * self.dt * force * m_inv
+                # A: half kick (only mobile atoms)
+                vel[mobile] = vel[mobile] + 0.5 * self.dt * force[mobile] * m_inv[mobile]
                 
-                # B: half drift
-                coords = coords + 0.5 * self.dt * vel
+                # B: half drift (only mobile atoms)
+                coords[mobile] = coords[mobile] + 0.5 * self.dt * vel[mobile]
                 
-                # O: Ornstein-Uhlenbeck (thermostat)
+                # O: Ornstein-Uhlenbeck thermostat (only mobile atoms)
                 sigma_v = np.sqrt(self.KB_KCAL * self.temperature / (masses * self.AMU_TO_KCAL_FS2_A2))
                 noise = np.random.randn(len(masses), 3) * sigma_v[:, np.newaxis]
-                vel = self.c1 * vel + self.c2 * noise
+                vel[mobile] = self.c1 * vel[mobile] + self.c2 * noise[mobile]
                 
-                # B: half drift
-                coords = coords + 0.5 * self.dt * vel
+                # B: half drift (only mobile atoms)
+                coords[mobile] = coords[mobile] + 0.5 * self.dt * vel[mobile]
                 
                 # Apply PBC if lattice exists
                 if lattice is not None:
@@ -1468,15 +1488,16 @@ class LangevinDynamics:
             # A: Compute new forces (after position update)
             forces = self._compute_forces(data)
             
-            # Final half kick
+            # Final half kick (only mobile atoms)
             for idx in data.index:
-                vel = velocities[idx]
+                vel = velocities[idx].copy()
                 force = forces[idx]
                 at_types = data.loc[idx, 'at_type']
                 masses = self._get_masses(at_types)
+                mobile = mobile_masks[idx]
                 m_inv = 1.0 / (masses * self.AMU_TO_KCAL_FS2_A2)
                 m_inv = m_inv[:, np.newaxis]
-                vel = vel + 0.5 * self.dt * force * m_inv
+                vel[mobile] = vel[mobile] + 0.5 * self.dt * force[mobile] * m_inv[mobile]
                 velocities[idx] = vel
             
             # Sample configurations
