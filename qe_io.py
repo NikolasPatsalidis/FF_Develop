@@ -493,7 +493,7 @@ def write_pw_input(at_types, positions, cell,  pseudo_map, prefix='pw', ibrav=0,
                    ecutrho=320,ecutwfc=80, calculation='scf',path='.',
                    electron_maxstep = 50, lattice_params = dict(),
                    scf_must_converge = '.true.', fixed=None, nstep=150,
-                   mixing_beta=0.3):
+                   mixing_beta=0.3, pseudo_dir='.pseudo', add_commas=True):
     """
     Write Quantum ESPRESSO pw.in file from atomic types, positions, and pseudopotentials.
 
@@ -513,10 +513,8 @@ def write_pw_input(at_types, positions, cell,  pseudo_map, prefix='pw', ibrav=0,
      
     # === Default QE parameters (can modify here) ===
     filename=f'{path}/{prefix}.in'
-    pseudo_dir = '~/data_simea/nikolas/QE/.pseudopot/'
 
-
-
+    ve = ','if add_commas else ''
     # If cell information is provided globally, you can overwrite it
     # For example: cell = supercell.get_cell()
 
@@ -526,26 +524,26 @@ def write_pw_input(at_types, positions, cell,  pseudo_map, prefix='pw', ibrav=0,
     with open(filename, 'w') as f:
         # CONTROL
         f.write('&CONTROL\n')
-        f.write(f'  calculation = {repr(calculation)}\n')
-        f.write(f'  prefix = {repr(prefix)}\n')
-        f.write(f' outdir = {prefix}_out\n')
-        f.write(f'  pseudo_dir = {repr(pseudo_dir)}\n')
-        f.write(f'  nstep = {nstep}\n')
+        f.write(f'  calculation = {repr(calculation)}{ve} \n')
+        f.write(f'  prefix = {repr(prefix)}{ve}\n')
+        f.write(f' outdir = {prefix}_out {ve}\n')
+        f.write(f'  pseudo_dir = {repr(pseudo_dir)} {ve}\n')
+        f.write(f'  nstep = {nstep}{ve}\n')
         f.write('/\n\n')
 
         # SYSTEM
         f.write('&SYSTEM\n')
-        f.write(f'  ibrav = {ibrav}\n')
-        f.write(f'  nat = {nat}\n')
-        f.write(f'  ntyp = {ntyp}\n')
-        f.write(f'  ecutwfc = {ecutwfc}\n')
+        f.write(f'  ibrav = {ibrav}{ve}\n')
+        f.write(f'  nat = {nat}{ve}\n')
+        f.write(f'  ntyp = {ntyp}{ve}\n')
+        f.write(f'  ecutwfc = {ecutwfc}{ve}\n')
         
-        f.write(f'  ecutrho = {ecutrho}\n')
-        f.write('  nosym = .true.\n')
-        f.write(f'  input_dft   =  {input_dft}\n')
-        f.write('  occupations = smearing\n')
-        f.write('  smearing = gauss\n')
-        f.write('  degauss = 0.05\n')
+        f.write(f'  ecutrho = {ecutrho}{ve}\n')
+        f.write('  nosym = .true.{ve}\n')
+        f.write(f'  input_dft   =  {input_dft}{ve}\n')
+        f.write('  occupations = smearing{ve}\n')
+        f.write('  smearing = gauss{ve}\n')
+        f.write('  degauss = 0.05{ve}\n')
         
         for k,v in lattice_params.items():
             f.write(f'  {k} = {v: 6.7f}\n')
@@ -554,22 +552,22 @@ def write_pw_input(at_types, positions, cell,  pseudo_map, prefix='pw', ibrav=0,
 
         # ELECTRONS
         f.write('&ELECTRONS\n')
-        f.write(f'  conv_thr = {conv_thr}\n')
-        f.write(f'  electron_maxstep = {electron_maxstep}\n' )
-        f.write(f'  scf_must_converge = {scf_must_converge}\n')
-        f.write(f'  mixing_beta = {mixing_beta}\n')
-        f.write(f'  mixing_mode = local-TF\n')
+        f.write(f'  conv_thr = {conv_thr}{ve}\n')
+        f.write(f'  electron_maxstep = {electron_maxstep}{ve}\n' )
+        f.write(f'  scf_must_converge = {scf_must_converge}{ve}\n')
+        f.write(f'  mixing_beta = {mixing_beta}{ve}\n')
+        f.write(f'  mixing_mode = local-TF{ve}\n')
 
         f.write('/\n\n')
         if 'relax' in calculation:
             f.write('\n')
             f.write('&IONS\n')
-            f.write('ion_dynamics = bfgs\n')
+            f.write('ion_dynamics = bfgs{ve}\n')
             f.write('/\n\n')
             if calculation == 'vc-relax':
                 f.write('\n')
                 f.write('&CELL\n')
-                f.write('cell_dynamics = bfgs\n')
+                f.write('cell_dynamics = bfgs{ve}\n')
                 f.write('/\n\n')
         # ATOMIC_SPECIES
         f.write('ATOMIC_SPECIES\n')

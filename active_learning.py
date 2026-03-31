@@ -163,6 +163,8 @@ class SchedulerConfig(ConfigBase):
         'time_limit': '23:59:00',
         'job_name': 'AL_DFT',
         'memory': '8G',
+        'account':'',
+        'cpus-per-task':1,
         'modules': '',                  # space-separated module names
         'pre_commands': '',             # commands to run before DFT
         'post_commands': '',            # commands after DFT
@@ -173,6 +175,7 @@ class SchedulerConfig(ConfigBase):
     def __init__(self):
         for key, value in self.defaults.items():
             setattr(self, key, value)
+            print(f'slurm:--> {key} : {value}')
     
     def generate_submit_script(self, work_dir, run_command):
         """Generate a scheduler submission script."""
@@ -193,10 +196,14 @@ class SchedulerConfig(ConfigBase):
 #SBATCH --partition={self.partition}
 #SBATCH --time={self.time_limit}
 #SBATCH --mem={self.memory}
-
-cd {work_dir}
-
 """
+        if self.account !='':
+            script +=f"#SBATCH --account={self.account}\n"
+        if self.cpus-per-task !=1:
+            script +=f"#SBATCH --cpus-per-task={self.cpus-per-task}\n"
+
+        script += "\n cd {work_dir} \n "
+
         if self.modules:
             for mod in self.modules.split():
                 script += f"module load {mod}\n"
@@ -689,6 +696,7 @@ class ActiveLearningPipeline:
                     ecutrho=dft_cfg.ecutrho,
                     k_points=dft_cfg.get_kpoints_tuple(),
                     nstep=dft_cfg.nstep,
+                    pseudo_dir = dft_cfg.pseudo_dir
                 )
         
         # Write a summary file
