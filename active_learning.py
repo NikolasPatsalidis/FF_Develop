@@ -582,6 +582,9 @@ class ActiveLearningPipeline:
         print(f'Training time = {perf_counter() - t1:.3e} sec')
         sys.stdout.flush()
         
+        # store the current optimizer
+        self.optimizer = optimizer
+
         # Write errors
         self.al.write_errors(optimizer.current_costs, iteration)
         
@@ -645,7 +648,6 @@ class ActiveLearningPipeline:
         ----------
         data : pd.DataFrame
             Current training data to start MD from.
-            
         Returns
         -------
         candidate_data : pd.DataFrame
@@ -1327,7 +1329,7 @@ class LangevinDynamics:
     KB_KCAL = 0.001987204  # Boltzmann constant in kcal/(mol·K)
     AMU_TO_KCAL_FS2_A2 = 0.0004184  # 1 amu·Å²/fs² = 0.0004184 kcal/mol
     
-    def __init__(self, optimizer, al_config, mass_map, fixed_types=None):
+    def __init__(self, optimizer , al_config, mass_map, fixed_types=None):
         self.optimizer = optimizer
         self.al_config = al_config
         self.mass_map = mass_map
