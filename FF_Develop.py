@@ -126,7 +126,7 @@ class readVASP(Parsers):
             data = pd.DataFrame()
             for j,(p,fn)  in enumerate(path_file_tuples):
                 df = self.read_OUTCAR(fn,p)
-                data = data.append(df, ignore_index = True)
+                data = pd.concat([data, df], ignore_index = True)
                 if j%10 ==0: print(f'... read {j+1} files ...')
         else:
             if filename is None:
@@ -541,7 +541,7 @@ class al_help():
                 
                 os.system('  ;  '.join([c1, c3,c4,c5]) )
                 new_data['sys_name'] = sname
-                candidate_data = candidate_data.append(new_data, ignore_index=True)
+                candidate_data = pd.concat( [ candidate_data, new_data], ignore_index=True)
         
         print('Lammps Simulations complete')
         sys.stdout.flush()
@@ -741,7 +741,7 @@ class al_help():
             print(f'Metropolis Hastings for {sysname} completed! Average acceptance {AR:5.4f}' ) 
 
             
-            candidate_data = candidate_data.append(candidate_data_sys,ignore_index=True)
+            candidate_data = pd.concat([candidate_data, candidate_data_sys], ignore_index=True)
 
         print('Metropolis Hastings completed! Average acceptance {:5.4f}'.format( c_size/(n*(step) ) ) )
         
@@ -2299,7 +2299,7 @@ class al_help():
 
 
 
-            selected_data = selected_data.append( candidate_data.loc[ix_sel] , ignore_index=True)
+            selected_data = pd.concat( [ selected_data, candidate_data.loc[ix_sel] ] , ignore_index=True)
         return selected_data
 
 
@@ -9695,7 +9695,8 @@ class Interfacial_Evaluator(Evaluator):
         if attrs is not None:
             uncol = np.array(attrs)
         
-        
+        ncol = max(ncol,1)
+
         _ = plt.figure(figsize=(size,size),dpi=dpi)
         plt.minorticks_on()
         plt.tick_params(direction='in', which='minor',length=size)
