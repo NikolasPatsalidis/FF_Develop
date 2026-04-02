@@ -3087,14 +3087,11 @@ logger = logobj.logger
 
 class GeneralFunctions:
     """Collection of general-purpose utility functions."""
-    
     @staticmethod
     def iterable(arg):
         """Check if `arg` is iterable (excluding strings)."""
-        return (
-            isinstance(arg, collections.Iterable) 
-            and not isinstance(arg, six.string_types)
-        )
+        return isinstance(arg, collections.abc.Iterable) and not isinstance(arg, str)
+
     @staticmethod
     def make_dir(name):
         """Create directory and all necessary parent directories."""
