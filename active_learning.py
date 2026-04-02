@@ -129,7 +129,7 @@ class ActiveLearningConfig(ConfigBase):
         'translate_whole': 0.3,               # probability to translate whole choose_from set
         'mc_asymptotic_steps':0,              # number of mc steps to skip sampling
         # Data cleaning thresholds
-        'max_energy_error': 0.1,              # kcal/mol - maximum allowed energy error
+        'max_energy_error': 150.0,              # kcal/mol - maximum estimated bfgs energy error (correlated to energy from local minima)
         'max_gradient_error': 1000.0,         # kcal/mol/Å - sanity check for extremely repulsive configs  
         'max_scf_correction': 0.5,            # kcal/mol/Å - maximum allowed SCF correction
         'forbidden_separation': 6.0,          # Å - cutoff for detecting disconnected clusters
