@@ -513,6 +513,11 @@ def write_pw_input(at_types, positions, cell,  pseudo_map, prefix='pw', ibrav=0,
      
     # === Default QE parameters (can modify here) ===
     filename=f'{path}/{prefix}.in'
+    occupations ='smearing'
+    smearing ='gauss'
+    outdir = f'{prefix}_out'
+    mixing_mode='local-TF'
+    ion_dynamics='bfgs'
 
     ve = ','if add_commas else ''
     # If cell information is provided globally, you can overwrite it
@@ -526,7 +531,7 @@ def write_pw_input(at_types, positions, cell,  pseudo_map, prefix='pw', ibrav=0,
         f.write('&CONTROL\n')
         f.write(f'  calculation = {repr(calculation)}{ve} \n')
         f.write(f'  prefix = {repr(prefix)}{ve}\n')
-        f.write(f' outdir = {prefix}_out {ve}\n')
+        f.write(f' outdir = {repr(outdir)}{ve}\n')
         f.write(f'  pseudo_dir = {repr(pseudo_dir)} {ve}\n')
         f.write(f'  nstep = {nstep}{ve}\n')
         f.write('/\n\n')
@@ -539,11 +544,11 @@ def write_pw_input(at_types, positions, cell,  pseudo_map, prefix='pw', ibrav=0,
         f.write(f'  ecutwfc = {ecutwfc}{ve}\n')
         
         f.write(f'  ecutrho = {ecutrho}{ve}\n')
-        f.write('  nosym = .true.{ve}\n')
-        f.write(f'  input_dft   =  {input_dft}{ve}\n')
-        f.write('  occupations = smearing{ve}\n')
-        f.write('  smearing = gauss{ve}\n')
-        f.write('  degauss = 0.05{ve}\n')
+        f.write(f'  nosym = .true.{ve}\n')
+        f.write(f'  input_dft   =  {repr(input_dft)}{ve}\n')
+        f.write(f'  occupations = {repr(occupations)}{ve}\n')
+        f.write(f'  smearing = {repr(smearing)}{ve}\n')
+        f.write(f'  degauss = 0.05{ve}\n')
         
         for k,v in lattice_params.items():
             f.write(f'  {k} = {v: 6.7f}\n')
@@ -556,13 +561,13 @@ def write_pw_input(at_types, positions, cell,  pseudo_map, prefix='pw', ibrav=0,
         f.write(f'  electron_maxstep = {electron_maxstep}{ve}\n' )
         f.write(f'  scf_must_converge = {scf_must_converge}{ve}\n')
         f.write(f'  mixing_beta = {mixing_beta}{ve}\n')
-        f.write(f'  mixing_mode = local-TF{ve}\n')
+        f.write(f'  mixing_mode = {repr(mixing_mode)}{ve}\n')
 
         f.write('/\n\n')
         if 'relax' in calculation:
             f.write('\n')
             f.write('&IONS\n')
-            f.write('ion_dynamics = bfgs{ve}\n')
+            f.write('ion_dynamics = {repr(ion_dynamics)}{ve}\n')
             f.write('/\n\n')
             if calculation == 'vc-relax':
                 f.write('\n')
