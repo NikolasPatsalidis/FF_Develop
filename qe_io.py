@@ -567,12 +567,12 @@ def write_pw_input(at_types, positions, cell,  pseudo_map, prefix='pw', ibrav=0,
         if 'relax' in calculation:
             f.write('\n')
             f.write('&IONS\n')
-            f.write('ion_dynamics = {repr(ion_dynamics)}{ve}\n')
+            f.write(f'ion_dynamics = {repr(ion_dynamics)}{ve}\n')
             f.write('/\n\n')
             if calculation == 'vc-relax':
                 f.write('\n')
                 f.write('&CELL\n')
-                f.write('cell_dynamics = bfgs{ve}\n')
+                f.write(f'cell_dynamics = {repr(ion_dynamics)}{ve}\n')
                 f.write('/\n\n')
         # ATOMIC_SPECIES
         f.write('ATOMIC_SPECIES\n')
