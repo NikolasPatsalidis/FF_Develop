@@ -129,10 +129,11 @@ class ActiveLearningConfig(ConfigBase):
         'translate_whole': 0.3,               # probability to translate whole choose_from set
         'mc_asymptotic_steps':0,              # number of mc steps to skip sampling
         # Data cleaning thresholds
-        'max_energy_error': 0.1,              # kcal/mol - maximum allowed energy error
+        'max_energy_error': 150.0,              # kcal/mol - maximum estimated bfgs energy error (correlated to energy from local minima)
         'max_gradient_error': 1000.0,         # kcal/mol/Å - sanity check for extremely repulsive configs  
         'max_scf_correction': 0.5,            # kcal/mol/Å - maximum allowed SCF correction
         'forbidden_separation': 6.0,          # Å - cutoff for detecting disconnected clusters
+        'max_ener' : 50,                      # maximum energy to keep the data in kcal/mol   
         # Langevin MD sampling parameters
         'md_initial_configs': 10,             # number of initial configs to start MD from
         'md_friction': 0.01,                  # friction coefficient (1/fs)
@@ -500,6 +501,7 @@ class ActiveLearningPipeline:
         print(f'Data reading time = {perf_counter() - t0:.3e} sec')
         return data
     
+    
     def clean_data(self, data):
         """
         Clean the training data.
@@ -550,6 +552,18 @@ class ActiveLearningPipeline:
         # Step 2: Clean well-separated structures (disconnected clusters)
         data = self.al.clean_well_separated_nanostructures(data, self.al_config.forbidden_separation)
         
+        filt_clean = False
+        for uns in np.unique(data['sys_name']):
+            fsys = uns == data['sys_name']
+            min_ener = data['Energy'][fsys].min()
+            fhigh_ener = data['Energy'] > min_ener + self.al_config.max_ener
+            fhigh_ener = np.logical_and(fsys, fhigh_ener)
+            filt_clean = np.logical_or( filt_clean, fhigh_ener)
+        
+        data = data[ np.logical_not(filt_clean) ]
+        n_ener_filt = len(data)
+        print(f'After energy maximum threshold filtering: {n_after_qe} -> {n_ener_filt} configs')
+        
         # Step 3: Standard FF cleaning
         data = self.al.clean_data(data, self.setup, self.beta_sampling)
         print('After FF cleaning:')
@@ -582,6 +596,9 @@ class ActiveLearningPipeline:
         print(f'Training time = {perf_counter() - t1:.3e} sec')
         sys.stdout.flush()
         
+        # store the current optimizer
+        self.optimizer = optimizer
+
         # Write errors
         self.al.write_errors(optimizer.current_costs, iteration)
         
@@ -645,7 +662,6 @@ class ActiveLearningPipeline:
         ----------
         data : pd.DataFrame
             Current training data to start MD from.
-            
         Returns
         -------
         candidate_data : pd.DataFrame
@@ -1327,7 +1343,7 @@ class LangevinDynamics:
     KB_KCAL = 0.001987204  # Boltzmann constant in kcal/(mol·K)
     AMU_TO_KCAL_FS2_A2 = 0.0004184  # 1 amu·Å²/fs² = 0.0004184 kcal/mol
     
-    def __init__(self, optimizer, al_config, mass_map, fixed_types=None):
+    def __init__(self, optimizer , al_config, mass_map, fixed_types=None):
         self.optimizer = optimizer
         self.al_config = al_config
         self.mass_map = mass_map

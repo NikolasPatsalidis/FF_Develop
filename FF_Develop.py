@@ -3087,14 +3087,11 @@ logger = logobj.logger
 
 class GeneralFunctions:
     """Collection of general-purpose utility functions."""
-    
     @staticmethod
     def iterable(arg):
         """Check if `arg` is iterable (excluding strings)."""
-        return (
-            isinstance(arg, collections.Iterable) 
-            and not isinstance(arg, six.string_types)
-        )
+        return isinstance(arg, collections.abc.Iterable) and not isinstance(arg, str)
+
     @staticmethod
     def make_dir(name):
         """Create directory and all necessary parent directories."""
@@ -5047,7 +5044,7 @@ class TestPotentials:
             ax[i].legend(frameon=False,fontsize=2.5*size)
         if fname is not None:
              plt.savefig(fname,bbox_inches='tight')
-        #plt.close()
+        plt.close()
         
         return
         
@@ -6387,7 +6384,7 @@ class Interactions():
             r,phi = get_rphi(r0,rc)
             plt.plot(r,phi)
         plt.savefig('activation.png',bbox_inches='tight')
-        #plt.close()
+        plt.close()
     @staticmethod
     def compute_coeff(r0,rc):
         """Compute polynomial coefficients for the local density activation function."""
@@ -6711,7 +6708,7 @@ class Data_Manager():
             plt.title('System {:s}'.format(s))
             plt.hist(self.data[col][f], bins=200, density=True, color='magenta')
             plt.savefig('{:s}/{:s}_{:s}_distribution.png'.format(path,s,col), bbox_inches='tight')
-        #plt.close()   
+            plt.close()
         return
     
     @staticmethod
@@ -7395,8 +7392,8 @@ class Data_Manager():
         else:
             plt.xlabel(r'{:s}({:s}) \ '.format(inter_type,'-'.join(ty)))
         plt.hist(dists,bins=bins,density=True,color='magenta')
-        #plt.close()
         plt.savefig(f'{self.setup.runpath}/discriptor_distribution_{inter_type}_{ty}.png',bbox_inches='tight') 
+        plt.close()
         if ret:
             return dists
         return
@@ -9728,7 +9725,7 @@ class Interfacial_Evaluator(Evaluator):
              plt.legend(frameon=False,fontsize=3.0*size)
         if fname is not None:
             plt.savefig('{:s}/{:s}'.format(path,fname),bbox_inches='tight')
-        #plt.close()
+        plt.close()
         if compare is not None:
             for i,c in enumerate(uncol):
                 _ = plt.figure(figsize=(size,size),dpi=dpi)
@@ -9751,7 +9748,7 @@ class Interfacial_Evaluator(Evaluator):
                     pre,po = fname.split('.')
                     fn = f'{pre}_{c}.{po}'
                     plt.savefig('{:s}/{:s}'.format(path,fn),bbox_inches='tight')
-                #plt.close()
+                plt.close()
         
         
         return
@@ -9803,7 +9800,7 @@ class Interfacial_Evaluator(Evaluator):
         if fname is not None:
             plt.savefig(fname,bbox_inches='tight')
         plt.ylabel(r'$U_{'+'{:s}'.format(model)+'}$ / kcal/mol')
-        #plt.close()
+        plt.close()
         return 
     
     
@@ -9892,7 +9889,7 @@ class Interfacial_Evaluator(Evaluator):
                 plt.savefig('{}/spths{}.png'.format(path,nfig),bbox_inches='tight')
             else:
                 plt.savefig('{:s}/{:s}'.format(path,fname),bbox_inches='tight')
-            #plt.close()
+            plt.close()
     
     def plot_eners(self,figsize=(3.3,3.3),dpi=300,
                    xlabel=r'$\AA$', ylabel=r'$kcal/mol$',
