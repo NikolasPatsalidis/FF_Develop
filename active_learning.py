@@ -1529,10 +1529,15 @@ class LangevinDynamics:
         # Compute initial forces and energies
         forces = self._compute_forces()
         
-        # Validate forces in first step using test_ForceClass
-        print("Validating analytical vs numerical forces...")
+        # Validate forces in first step using test_ForceClass (only on mobile atoms)
+        # Get mobile atom indices from first config
+        first_idx = data.index[0]
+        mobile_atom_indices = np.where(mobile_masks[first_idx])[0].tolist()
+        print(mobile_atom_indices)
+        print(f"Validating analytical vs numerical forces on {len(mobile_atom_indices)} mobile atoms...")
         _, max_diff = self.optimizer.test_ForceClass(which='opt', epsilon=1e-4, verbose=True, 
-                                                      random_tries=3, order=4)
+                                                      random_tries=3, order=4,
+                                                      mobile_atoms=mobile_atom_indices)
         force_tol = 1e-2  # tolerance in kcal/(mol·Å)
         if max_diff > force_tol:
             raise RuntimeError(f"Force validation FAILED! max_diff={max_diff:.4e} > tol={force_tol:.4e}. "
@@ -1667,7 +1672,7 @@ class LangevinDynamics:
                 max_vel = max(np.abs(velocities[idx]).max() for idx in data.index)
                 max_force = max(np.abs(forces[idx]).max() for idx in data.index)
                 v_thermal = np.sqrt(self.KB_KCAL * self.temperature * self.KCAL_TO_AMU_A2_FS2 / 1.008)
-                print(f"  Step {step + 1}/{n_steps} | v_max={max_vel:.4f} Å/fs (v_th={v_thermal:.4f}) | F_max={max_force:.2f} kcal/mol/Å | configs={len(sampled_configs)}")
+                print(f"  Step {step + 1}/{n_steps} | v_max={max_vel:.4f} Å/fs (v_th (H) ~{v_thermal:.4f}) | F_max={max_force:.2f} kcal/mol/Å | configs={len(sampled_configs)}")
         
         # Close trajectory files
         for fh in traj_files.values():

@@ -7889,7 +7889,8 @@ class FF_Optimizer(Optimizer):
    
     def test_ForceClass(self, which='opt', epsilon=1e-4,  seed = 2024,
                         verbose=False,random_tries=10,
-                        check_only_analytical_forces=False,order=4):
+                        check_only_analytical_forces=False,order=4,
+                        mobile_atoms=None):
         """
         Compute and compare the analytical and numerical Forces
         using second order finite difference methods.
@@ -7922,6 +7923,9 @@ class FF_Optimizer(Optimizer):
         order : int, optional
             order of differentiation
             Default is 4
+        mobile_atoms : list or numpy.ndarray, optional
+            List of atom indices to test. If None, random atoms are selected.
+            If provided, only these atoms will be tested on each random try.
         
         """
         dataset='all'
@@ -7979,7 +7983,11 @@ class FF_Optimizer(Optimizer):
         seeds = np.random.randint(0,random_tries*1000,size=random_tries)
         for random_try in range(random_tries):
             np.random.seed(seeds[random_try])
-            atoms_to_modify = [np.random.randint(0,natoms) for m, natoms  in enumerate(natoms_per_point)]
+            if mobile_atoms is not None:
+                # Select random atom from mobile_atoms list for each data point
+                atoms_to_modify = [mobile_atoms[np.random.randint(0, len(mobile_atoms))] for m in range(len(natoms_per_point))]
+            else:
+                atoms_to_modify = [np.random.randint(0,natoms) for m, natoms  in enumerate(natoms_per_point)]
             differences = []
             for dir_index in range(3): 
                 
