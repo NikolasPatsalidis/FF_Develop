@@ -1569,7 +1569,7 @@ class LangevinDynamics:
                 mobile = mobile_masks[idx]
                 
                 # Debug output for first few steps
-                if step < 3 and idx == data.index[0]:
+                if step < 300 and idx == data.index[0]:
                     print(f"\n=== DEBUG Step {step} ===")
                     print(f"dt = {self.dt} fs, friction = {self.friction} /fs, T = {self.temperature} K")
                     print(f"c1 = {self.c1:.6f}, c2 = {self.c2:.6f}")
@@ -1599,25 +1599,41 @@ class LangevinDynamics:
                 m_inv = m_inv[:, np.newaxis]
                 
                 # A: half kick (only mobile atoms)
+                vel_before_kick = vel[mobile].copy()
                 vel[mobile] = vel[mobile] + 0.5 * self.dt * force[mobile] * m_inv[mobile]
+                
+                # Debug velocity at each sub-step
+                if step == 0 and idx == data.index[0]:
+                    dv_kick = vel[mobile] - vel_before_kick
+                    print(f"After A (half kick): vel max={np.abs(vel[mobile]).max():.6f}, Δv max={np.abs(dv_kick).max():.6f}")
                 
                 # B: half drift (only mobile atoms)
                 coords_before = coords[mobile].copy()
                 coords[mobile] = coords[mobile] + 0.5 * self.dt * vel[mobile]
                 
+                if step == 0 and idx == data.index[0]:
+                    dr1 = coords[mobile] - coords_before
+                    print(f"After B1 (half drift): Δr max={np.abs(dr1).max():.6f}")
+                
                 # O: Ornstein-Uhlenbeck thermostat (only mobile atoms)
                 sigma_v = np.sqrt(self.KB_KCAL * self.temperature * self.KCAL_TO_AMU_A2_FS2 / masses)
+                vel_before_therm = vel[mobile].copy()
                 noise = np.random.randn(len(masses), 3) * sigma_v[:, np.newaxis]
                 vel[mobile] = self.c1 * vel[mobile] + self.c2 * noise[mobile]
                 
+                if step == 0 and idx == data.index[0]:
+                    print(f"After O (thermostat): vel max={np.abs(vel[mobile]).max():.6f}, c1*v_old max={np.abs(self.c1*vel_before_therm).max():.6f}")
+                
                 # B: half drift (only mobile atoms)
+                coords_before2 = coords[mobile].copy()
                 coords[mobile] = coords[mobile] + 0.5 * self.dt * vel[mobile]
                 
                 # Debug: check displacement after first step
                 if step == 0 and idx == data.index[0]:
+                    dr2 = coords[mobile] - coords_before2
+                    print(f"After B2 (half drift): Δr max={np.abs(dr2).max():.6f}")
                     disp = np.linalg.norm(coords[mobile] - coords_before, axis=1)
-                    print(f"Displacement after step 0 (Å): max={disp.max():.6f}, mean={disp.mean():.6f}")
-                    print(f"Final vel after thermostat (Å/fs): max={np.abs(vel[mobile]).max():.6f}")
+                    print(f"Total displacement step 0 (Å): max={disp.max():.6f}, mean={disp.mean():.6f}")
                 
                 # Apply PBC if lattice exists
                 if lattice is not None:
@@ -1682,7 +1698,7 @@ class LangevinDynamics:
                         comment = f"step={step+1} time_fs={(step+1)*self.dt:.2f} Uclass={energies[idx]:.4f}"
                         self._write_xyz_frame(traj_files[idx], coords, at_types, lattice, comment)
                     
-            if (step + 1) % 100 == 0:
+            if (step + 1) % 1 == 0:
                 print(f"  Step {step + 1}/{n_steps}, sampled {len(sampled_configs)} configs")
         
         # Close trajectory files
