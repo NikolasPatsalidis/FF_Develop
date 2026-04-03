@@ -140,6 +140,7 @@ class ActiveLearningConfig(ConfigBase):
         'md_timestep': 1.0,                   # timestep in fs
         'md_integration_time': 1000.0,        # total integration time in fs
         'md_sampling_time': 10.0,             # store configurations every this many fs
+        'md_save_traj': 'no',                 # 'no', 'sampled', 'full' - save trajectory to xyz
     }
     
     def __init__(self):
@@ -630,7 +631,7 @@ class ActiveLearningPipeline:
         if sampling_method == 'perturbation':
             candidate_data = self.al.make_random_petrubations(data, sigma=self.sigma)
         elif sampling_method == 'md':
-            candidate_data = self._sample_via_langevin(data)
+            candidate_data = self._sample_via_langevin(data, iteration)
         elif sampling_method == 'mc':
             candidate_data  = self.al.MC_sample( data, self.setup, self.al_config )
             
@@ -655,13 +656,15 @@ class ActiveLearningPipeline:
         
         return selected_data
     
-    def _sample_via_langevin(self, data):
+    def _sample_via_langevin(self, data, iteration):
         """Sample configurations using internal Langevin dynamics.
         
         Parameters
         ----------
         data : pd.DataFrame
             Current training data to start MD from.
+        iteration : int
+            Current iteration number for trajectory file naming.
         Returns
         -------
         candidate_data : pd.DataFrame
@@ -696,12 +699,16 @@ class ActiveLearningPipeline:
             if col not in init_data.columns:
                 raise ValueError(f"Data missing required column: {col}")
         
-        # Run Langevin dynamics
-        sampled_df = langevin.integrate(init_data, n_configs=n_init)
+        # Run Langevin dynamics with trajectory saving option
+        save_traj = self.al_config.md_save_traj
+        sampled_df = langevin.integrate(
+            init_data, n_configs=n_init, iteration=iteration,
+            save_traj=save_traj, output_dir=self.setup.runpath
+        )
         
         # Convert to format expected by rest of pipeline
-        # Keep only columns needed for DFT preparation
-        candidate_data = sampled_df[['coords', 'at_type', 'natoms', 'lattice', 'sys_name']].copy()
+        # Keep columns needed for DFT preparation plus Uclass
+        candidate_data = sampled_df[['coords', 'at_type', 'natoms', 'lattice', 'sys_name', 'Uclass']].copy()
         
         return candidate_data
     
@@ -1406,7 +1413,32 @@ class LangevinDynamics:
             
         return forces_dict
     
-    def integrate(self, init_data, n_configs=None):
+    def _compute_energies(self, which='opt'):
+        """Compute classical energies for all configurations in data."""
+        models = getattr(self.setup, which + '_models')
+        params, bounds, fixed_params, isnot_fixed, reguls = self.optimizer.get_parameter_info(models)
+        
+        ndata = len(self.optimizer.data)
+        models_list_info = self.optimizer.get_list_of_model_information(models, 'all')
+        
+        Uclass = self.optimizer.computeUclass(params, ndata, models_list_info)
+        
+        # Return as dict keyed by index
+        return {idx: Uclass[i] for i, idx in enumerate(self.optimizer.data.index)}
+    
+    def _write_xyz_frame(self, fh, coords, at_types, lattice=None, comment=''):
+        """Write a single XYZ frame to file handle."""
+        natoms = len(at_types)
+        fh.write(f"{natoms}\n")
+        if lattice is not None:
+            lat_str = ' '.join([f"{x:.6f}" for row in lattice for x in row])
+            fh.write(f"Lattice=\"{lat_str}\" {comment}\n")
+        else:
+            fh.write(f"{comment}\n")
+        for at, xyz in zip(at_types, coords):
+            fh.write(f"{at} {xyz[0]:.6f} {xyz[1]:.6f} {xyz[2]:.6f}\n")
+    
+    def integrate(self, init_data, n_configs=None, iteration=0, save_traj='no', output_dir='.'):
         """Run Langevin dynamics and sample configurations.
         
         Parameters
@@ -1415,6 +1447,14 @@ class LangevinDynamics:
             Initial configurations with columns: coords, at_type, natoms, lattice (optional).
         n_configs : int, optional
             Number of configs to start from. If None, use all.
+        iteration : int, optional
+            Current iteration number for trajectory file naming.
+        save_traj : str, optional
+            'no' - don't save trajectories
+            'sampled' - save only sampled frames
+            'full' - save all frames
+        output_dir : str, optional
+            Directory to save trajectory files.
             
         Returns
         -------
@@ -1468,6 +1508,17 @@ class LangevinDynamics:
         
         # Reference to optimizer's data (same object, updated in place)
         data = self.optimizer.data
+        
+        # Setup trajectory file handles if saving
+        traj_files = {}
+        if save_traj != 'no':
+            import os
+            traj_dir = os.path.join(output_dir, f'iter{iteration}')
+            os.makedirs(traj_dir, exist_ok=True)
+            for idx in data.index:
+                traj_path = os.path.join(traj_dir, f'traj_{save_traj}_{idx}.xyz')
+                traj_files[idx] = open(traj_path, 'w')
+            print(f"Saving {save_traj} trajectories to {traj_dir}")
         
         # Compute initial forces
         forces = self._compute_forces()
@@ -1528,21 +1579,48 @@ class LangevinDynamics:
                 vel[mobile] = vel[mobile] + 0.5 * self.dt * force[mobile] * m_inv[mobile]
                 velocities[idx] = vel
             
-            # Sample configurations
-            if (step + 1) % sample_interval == 0:
+            # Write full trajectory if requested
+            if save_traj == 'full':
+                energies = self._compute_energies()
                 for idx in data.index:
+                    coords = np.array(self.optimizer.data.loc[idx, 'coords'], dtype=float)
+                    at_types = self.optimizer.data.loc[idx, 'at_type']
+                    lattice = self.optimizer.data.loc[idx, 'lattice'] if 'lattice' in self.optimizer.data.columns else None
+                    comment = f"step={step+1} time_fs={(step+1)*self.dt:.2f} Uclass={energies[idx]:.4f}"
+                    self._write_xyz_frame(traj_files[idx], coords, at_types, lattice, comment)
+            
+            # Sample configurations
+            is_sample_step = (step + 1) % sample_interval == 0
+            if is_sample_step:
+                energies = self._compute_energies()
+                for idx in data.index:
+                    coords = np.array(self.optimizer.data.loc[idx, 'coords'], dtype=float)
+                    at_types = self.optimizer.data.loc[idx, 'at_type']
+                    lattice = self.optimizer.data.loc[idx, 'lattice'] if 'lattice' in self.optimizer.data.columns else None
+                    sys_name = self.optimizer.data.loc[idx, 'sys_name'] if 'sys_name' in self.optimizer.data.columns else f'md_{idx}'
+                    
                     sampled_configs.append({
-                        'coords': copy.deepcopy(self.optimizer.data.loc[idx, 'coords']),
-                        'at_type': self.optimizer.data.loc[idx, 'at_type'],
+                        'coords': copy.deepcopy(coords),
+                        'at_type': at_types,
                         'natoms': self.optimizer.data.loc[idx, 'natoms'],
-                        'lattice': self.optimizer.data.loc[idx, 'lattice'] if 'lattice' in self.optimizer.data.columns else None,
-                        'sys_name': self.optimizer.data.loc[idx, 'sys_name'] if 'sys_name' in self.optimizer.data.columns else f'md_{idx}',
+                        'lattice': lattice,
+                        'sys_name': sys_name,
                         'step': step + 1,
                         'time_fs': (step + 1) * self.dt,
+                        'Uclass': energies[idx],
                     })
+                    
+                    # Write sampled trajectory if requested
+                    if save_traj == 'sampled':
+                        comment = f"step={step+1} time_fs={(step+1)*self.dt:.2f} Uclass={energies[idx]:.4f}"
+                        self._write_xyz_frame(traj_files[idx], coords, at_types, lattice, comment)
                     
             if (step + 1) % 100 == 0:
                 print(f"  Step {step + 1}/{n_steps}, sampled {len(sampled_configs)} configs")
+        
+        # Close trajectory files
+        for fh in traj_files.values():
+            fh.close()
         
         print(f"Langevin dynamics complete. Sampled {len(sampled_configs)} configurations.")
         return pd.DataFrame(sampled_configs)
