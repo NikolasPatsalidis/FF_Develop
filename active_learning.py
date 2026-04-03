@@ -1348,7 +1348,9 @@ class LangevinDynamics:
     
     # Conversion factors
     KB_KCAL = 0.001987204  # Boltzmann constant in kcal/(mol·K)
-    AMU_TO_KCAL_FS2_A2 = 0.0004184  # 1 amu·Å²/fs² = 0.0004184 kcal/mol
+    # 1 kcal/mol = 0.0004184 amu·(Å/fs)² (for converting energy to mass*velocity²)
+    # Equivalently: 1 amu·(Å/fs)² = 2390 kcal/mol
+    KCAL_TO_AMU_A2_FS2 = 0.0004184
     
     def __init__(self, setup, al_config, mass_map, fixed_types=None):
         self.setup = setup
@@ -1379,16 +1381,15 @@ class LangevinDynamics:
         return np.array([at not in self.fixed_types for at in at_types])
     
     def _apply_pbc(self, coords, lattice):
-        """Wrap coordinates into primary cell using PBC."""
-        if lattice is None:
-            return coords
-        inv_lattice = np.linalg.inv(lattice)
-        # Convert to fractional
-        frac = np.dot(coords, inv_lattice)
-        # Wrap to [0, 1)
-        frac = frac - np.floor(frac)
-        # Convert back to Cartesian
-        return np.dot(frac, lattice)
+        """Wrap coordinates into primary cell using PBC.
+        
+        NOTE: For molecular systems, per-atom wrapping breaks connectivity.
+        This is disabled for now - forces are computed with MIC automatically.
+        For interfacial systems, molecules should stay near the surface.
+        """
+        # Don't wrap individual atoms - this breaks molecules!
+        # The force field handles MIC correctly in make_interactions.
+        return coords
     
     def _compute_forces(self, which='opt'):
         """Compute forces for all configurations in data."""
@@ -1417,6 +1418,10 @@ class LangevinDynamics:
         """Compute classical energies for all configurations in data."""
         models = getattr(self.setup, which + '_models')
         params, bounds, fixed_params, isnot_fixed, reguls = self.optimizer.get_parameter_info(models)
+        
+        # Rebuild interactions with MIC (if not already done by _compute_forces)
+        if 'descriptor_info' not in self.optimizer.data.columns:
+            ff.al_help.make_interactions(self.optimizer.data, self.setup)
         
         ndata = len(self.optimizer.data)
         models_list_info = self.optimizer.get_list_of_model_information(models, 'all')
@@ -1487,7 +1492,8 @@ class LangevinDynamics:
             mobile_masks[idx] = mobile_mask
             
             # v = sqrt(kT/m) * random_normal, but zero for fixed atoms
-            sigma_v = np.sqrt(self.KB_KCAL * self.temperature / (masses * self.AMU_TO_KCAL_FS2_A2))
+            # sigma_v² = k_B*T * conversion / m, where conversion: kcal/mol -> amu·(Å/fs)²
+            sigma_v = np.sqrt(self.KB_KCAL * self.temperature * self.KCAL_TO_AMU_A2_FS2 / masses)
             vel = np.random.randn(natoms, 3) * sigma_v[:, np.newaxis]
             vel[~mobile_mask] = 0.0  # Zero velocity for fixed atoms
             velocities[idx] = vel
@@ -1520,8 +1526,36 @@ class LangevinDynamics:
                 traj_files[idx] = open(traj_path, 'w')
             print(f"Saving {save_traj} trajectories to {traj_dir}")
         
-        # Compute initial forces
+        # Compute initial forces and energies
         forces = self._compute_forces()
+        
+        # Write initial frame (step 0) if saving trajectories
+        if save_traj != 'no':
+            energies = self._compute_energies()
+            for idx in data.index:
+                coords = np.array(self.optimizer.data.loc[idx, 'coords'], dtype=float)
+                at_types = self.optimizer.data.loc[idx, 'at_type']
+                lattice = self.optimizer.data.loc[idx, 'lattice'] if 'lattice' in self.optimizer.data.columns else None
+                comment = f"step=0 time_fs=0.00 Uclass={energies[idx]:.4f} (initial)"
+                self._write_xyz_frame(traj_files[idx], coords, at_types, lattice, comment)
+        
+        # Also store initial configuration in sampled_configs
+        energies = self._compute_energies()
+        for idx in data.index:
+            coords = np.array(self.optimizer.data.loc[idx, 'coords'], dtype=float)
+            at_types = self.optimizer.data.loc[idx, 'at_type']
+            lattice = self.optimizer.data.loc[idx, 'lattice'] if 'lattice' in self.optimizer.data.columns else None
+            sys_name = self.optimizer.data.loc[idx, 'sys_name'] if 'sys_name' in self.optimizer.data.columns else f'md_{idx}'
+            sampled_configs.append({
+                'coords': copy.deepcopy(coords),
+                'at_type': at_types,
+                'natoms': self.optimizer.data.loc[idx, 'natoms'],
+                'lattice': lattice,
+                'sys_name': sys_name,
+                'step': 0,
+                'time_fs': 0.0,
+                'Uclass': energies[idx],
+            })
         
         for step in range(n_steps):
             # BAOAB integrator
@@ -1534,8 +1568,9 @@ class LangevinDynamics:
                 lattice = data.loc[idx, 'lattice'] if 'lattice' in data.columns else None
                 mobile = mobile_masks[idx]
                 
-                # Mass array for vectorized ops
-                m_inv = 1.0 / (masses * self.AMU_TO_KCAL_FS2_A2)  # 1/(amu * conversion)
+                # Mass array for vectorized ops: a = F * conversion / m
+                # F is in kcal/(mol·Å), convert to amu·Å/fs² then divide by mass
+                m_inv = self.KCAL_TO_AMU_A2_FS2 / masses
                 m_inv = m_inv[:, np.newaxis]
                 
                 # A: half kick (only mobile atoms)
@@ -1545,7 +1580,7 @@ class LangevinDynamics:
                 coords[mobile] = coords[mobile] + 0.5 * self.dt * vel[mobile]
                 
                 # O: Ornstein-Uhlenbeck thermostat (only mobile atoms)
-                sigma_v = np.sqrt(self.KB_KCAL * self.temperature / (masses * self.AMU_TO_KCAL_FS2_A2))
+                sigma_v = np.sqrt(self.KB_KCAL * self.temperature * self.KCAL_TO_AMU_A2_FS2 / masses)
                 noise = np.random.randn(len(masses), 3) * sigma_v[:, np.newaxis]
                 vel[mobile] = self.c1 * vel[mobile] + self.c2 * noise[mobile]
                 
@@ -1574,7 +1609,7 @@ class LangevinDynamics:
                 at_types = data.loc[idx, 'at_type']
                 masses = self._get_masses(at_types)
                 mobile = mobile_masks[idx]
-                m_inv = 1.0 / (masses * self.AMU_TO_KCAL_FS2_A2)
+                m_inv = self.KCAL_TO_AMU_A2_FS2 / masses
                 m_inv = m_inv[:, np.newaxis]
                 vel[mobile] = vel[mobile] + 0.5 * self.dt * force[mobile] * m_inv[mobile]
                 velocities[idx] = vel
