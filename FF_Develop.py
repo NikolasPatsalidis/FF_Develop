@@ -7502,6 +7502,69 @@ class FF_Optimizer(Optimizer):
         
         return  models_list
     
+    def analyze_angle_data(self, which='opt', dataset='all'):
+        """Analyze angle distribution in training data to diagnose fitting issues.
+        
+        Returns statistics about angle values and corresponding forces for each angle type.
+        """
+        models = getattr(self.setup, which + '_models')
+        descriptor_info = self.data['descriptor_info']
+        
+        print("\n" + "="*60)
+        print("ANGLE DATA ANALYSIS")
+        print("="*60)
+        
+        for name, model in models.items():
+            if model.category != 'AN':
+                continue
+            
+            angle_type = model.type
+            th0 = model.parameters[0]
+            k = model.parameters[1]
+            
+            # Collect all angles for this type
+            all_angles = []
+            for idx, val in descriptor_info.items():
+                if 'angles' in val and angle_type in val['angles']:
+                    angles = val['angles'][angle_type]['values']
+                    all_angles.extend(angles)
+            
+            if len(all_angles) == 0:
+                print(f"\n{name}: NO DATA for angle type {angle_type}")
+                continue
+            
+            all_angles = np.array(all_angles)
+            
+            print(f"\n{name} ({' '.join(angle_type)}):")
+            print(f"  Current parameters: th0 = {th0:.4f} rad ({np.degrees(th0):.1f}°), k = {k:.4f}")
+            print(f"  N samples: {len(all_angles)}")
+            print(f"  Angle statistics:")
+            print(f"    Mean:   {np.mean(all_angles):.4f} rad ({np.degrees(np.mean(all_angles)):.1f}°)")
+            print(f"    Std:    {np.std(all_angles):.4f} rad ({np.degrees(np.std(all_angles)):.1f}°)")
+            print(f"    Min:    {np.min(all_angles):.4f} rad ({np.degrees(np.min(all_angles)):.1f}°)")
+            print(f"    Max:    {np.max(all_angles):.4f} rad ({np.degrees(np.max(all_angles)):.1f}°)")
+            print(f"    Median: {np.median(all_angles):.4f} rad ({np.degrees(np.median(all_angles)):.1f}°)")
+            
+            # Expected th0 for water H-O-H is ~1.82 rad (104.5°)
+            # Check if data supports current th0 or expected value
+            residuals_current = all_angles - th0
+            residuals_expected = all_angles - 1.82  # ~104.5° for water
+            
+            print(f"  Residuals from current th0 ({np.degrees(th0):.1f}°):")
+            print(f"    Mean: {np.mean(residuals_current):.4f}, Std: {np.std(residuals_current):.4f}")
+            print(f"  Residuals from expected th0 (104.5°):")
+            print(f"    Mean: {np.mean(residuals_expected):.4f}, Std: {np.std(residuals_expected):.4f}")
+            
+            # Histogram bins
+            hist, bin_edges = np.histogram(np.degrees(all_angles), bins=10)
+            print(f"  Angle histogram (degrees):")
+            for i in range(len(hist)):
+                bar = '*' * min(hist[i], 50)
+                print(f"    [{bin_edges[i]:6.1f}-{bin_edges[i+1]:6.1f}]: {hist[i]:4d} {bar}")
+        
+        print("\n" + "="*60)
+        return
+
     def set_UFclass_ondata(self,which='opt',dataset='all'):
         """Compute and store classical energies and forces on the dataset."""
         

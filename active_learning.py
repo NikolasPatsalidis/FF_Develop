@@ -550,8 +550,6 @@ class ActiveLearningPipeline:
         n_after_qe = len(data)
         print(f'After QE quality filtering: {n_initial} -> {n_after_qe} configs')
         
-        # Step 2: Clean well-separated structures (disconnected clusters)
-        data = self.al.clean_well_separated_nanostructures(data, self.al_config.forbidden_separation)
         
         filt_clean = False
         for uns in np.unique(data['sys_name']):
@@ -564,6 +562,9 @@ class ActiveLearningPipeline:
         data = data[ np.logical_not(filt_clean) ]
         n_ener_filt = len(data)
         print(f'After energy maximum threshold filtering: {n_after_qe} -> {n_ener_filt} configs')
+        
+        # Step 2: Clean well-separated structures (disconnected clusters)
+        data = self.al.clean_well_separated_nanostructures(data, self.al_config.forbidden_separation)
         
         # Step 3: Standard FF cleaning
         data = self.al.clean_data(data, self.setup, self.beta_sampling)
@@ -1533,8 +1534,8 @@ class LangevinDynamics:
         # Get mobile atom indices from first config
         first_idx = data.index[0]
         mobile_atom_indices = np.where(mobile_masks[first_idx])[0].tolist()
-        print(mobile_atom_indices)
-        print(f"Validating analytical vs numerical forces on {len(mobile_atom_indices)} mobile atoms...")
+        
+        print(f"Validating analytical vs numerical forces on {len(mobile_atom_indices)} mobile atoms... mobile indices = {mobile_atom_indices}")
         _, max_diff = self.optimizer.test_ForceClass(which='opt', epsilon=1e-4, verbose=True, 
                                                       random_tries=3, order=4,
                                                       mobile_atoms=mobile_atom_indices)
