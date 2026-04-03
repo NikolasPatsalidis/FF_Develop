@@ -1577,41 +1577,6 @@ class LangevinDynamics:
                 lattice = data.loc[idx, 'lattice'] if 'lattice' in data.columns else None
                 mobile = mobile_masks[idx]
                 
-                # Debug output for first few steps
-                if step < 300 and idx == data.index[0]:
-                    print(f"\n=== DEBUG Step {step} ===")
-                    print(f"dt = {self.dt} fs, friction = {self.friction} /fs, T = {self.temperature} K")
-                    print(f"Masses (mobile): {masses[mobile]}")
-                    print(f"Initial vel (mobile, Å/fs): max={np.abs(vel[mobile]).max():.6f}")
-                    print(f"Force (mobile, kcal/mol/Å): max={np.abs(force[mobile]).max():.4f}")
-                    print(f"Expected v_thermal (H at {self.temperature}K): {np.sqrt(self.KB_KCAL * self.temperature * self.KCAL_TO_AMU_A2_FS2 / 1.008):.6f} Å/fs")
-                    
-                    # Check force DIRECTION for first O-H bond
-                    mobile_coords = coords[mobile]
-                    mobile_forces = force[mobile]
-                    if len(mobile_coords) >= 2:
-                        # O is atom 0, H is atom 1
-                        r_OH = mobile_coords[1] - mobile_coords[0]  # vector from O to H
-                        d_OH = np.linalg.norm(r_OH)
-                        r_OH_unit = r_OH / d_OH
-                        
-                        # Force on H along O-H direction
-                        F_H = mobile_forces[1]  # Force on H
-                        F_H_along_bond = np.dot(F_H, r_OH_unit)  # + means pushing H away from O
-                        
-                        print(f"O-H bond analysis:")
-                        print(f"  Distance O-H: {d_OH:.4f} Å (equilibrium ~0.96 Å)")
-                        print(f"  r_OH vector: {r_OH}")
-                        print(f"  Force on H: {F_H}")
-                        print(f"  F_H along bond: {F_H_along_bond:.4f} kcal/(mol·Å)")
-                        print(f"    (+) means pushing H AWAY from O (repulsive)")
-                        print(f"    (-) means pushing H TOWARD O (attractive)")
-                        
-                        if d_OH < 0.96 and F_H_along_bond < 0:
-                            print(f"  *** BUG: Bond compressed but force is ATTRACTIVE! Should be repulsive! ***")
-                        elif d_OH > 0.96 and F_H_along_bond > 0:
-                            print(f"  *** BUG: Bond stretched but force is REPULSIVE! Should be attractive! ***")
-                
                 # Mass array for vectorized ops: a = F * conversion / m
                 # F is in kcal/(mol·Å), convert to amu·Å/fs² then divide by mass
                 m_inv = self.KCAL_TO_AMU_A2_FS2 / masses
@@ -1620,41 +1585,18 @@ class LangevinDynamics:
                 # A: half kick (only mobile atoms)
                 # Force field now returns physical force F = -dU/dr (fixed in ForcesPerModel)
                 # Standard velocity update: v = v + F/m * dt
-                vel_before_kick = vel[mobile].copy()
                 vel[mobile] = vel[mobile] + 0.5 * self.dt * force[mobile] * m_inv[mobile]
                 
-                # Debug velocity at each sub-step
-                if step == 0 and idx == data.index[0]:
-                    dv_kick = vel[mobile] - vel_before_kick
-                    print(f"After A (half kick): vel max={np.abs(vel[mobile]).max():.6f}, Δv max={np.abs(dv_kick).max():.6f}")
-                
                 # B: half drift (only mobile atoms)
-                coords_before = coords[mobile].copy()
                 coords[mobile] = coords[mobile] + 0.5 * self.dt * vel[mobile]
-                
-                if step == 0 and idx == data.index[0]:
-                    dr1 = coords[mobile] - coords_before
-                    print(f"After B1 (half drift): Δr max={np.abs(dr1).max():.6f}")
                 
                 # O: Ornstein-Uhlenbeck thermostat (only mobile atoms)
                 sigma_v = np.sqrt(self.KB_KCAL * self.temperature * self.KCAL_TO_AMU_A2_FS2 / masses)
-                vel_before_therm = vel[mobile].copy()
                 noise = np.random.randn(len(masses), 3) * sigma_v[:, np.newaxis]
                 vel[mobile] = self.c1 * vel[mobile] + self.c2 * noise[mobile]
                 
-                if step == 0 and idx == data.index[0]:
-                    print(f"After O (thermostat): vel max={np.abs(vel[mobile]).max():.6f}, c1*v_old max={np.abs(self.c1*vel_before_therm).max():.6f}")
-                
                 # B: half drift (only mobile atoms)
-                coords_before2 = coords[mobile].copy()
                 coords[mobile] = coords[mobile] + 0.5 * self.dt * vel[mobile]
-                
-                # Debug: check displacement after first step
-                if step == 0 and idx == data.index[0]:
-                    dr2 = coords[mobile] - coords_before2
-                    print(f"After B2 (half drift): Δr max={np.abs(dr2).max():.6f}")
-                    disp = np.linalg.norm(coords[mobile] - coords_before, axis=1)
-                    print(f"Total displacement step 0 (Å): max={disp.max():.6f}, mean={disp.mean():.6f}")
                 
                 # Apply PBC if lattice exists
                 if lattice is not None:
@@ -1720,8 +1662,12 @@ class LangevinDynamics:
                         comment = f"step={step+1} time_fs={(step+1)*self.dt:.2f} Uclass={energies[idx]:.4f}"
                         self._write_xyz_frame(traj_files[idx], coords, at_types, lattice, comment)
                     
-            if (step + 1) % 1 == 0:
-                print(f"  Step {step + 1}/{n_steps}, sampled {len(sampled_configs)} configs")
+            if (step + 1) % 10 == 0:
+                # Get max velocity and force for monitoring
+                max_vel = max(np.abs(velocities[idx]).max() for idx in data.index)
+                max_force = max(np.abs(forces[idx]).max() for idx in data.index)
+                v_thermal = np.sqrt(self.KB_KCAL * self.temperature * self.KCAL_TO_AMU_A2_FS2 / 1.008)
+                print(f"  Step {step + 1}/{n_steps} | v_max={max_vel:.4f} Å/fs (v_th={v_thermal:.4f}) | F_max={max_force:.2f} kcal/mol/Å | configs={len(sampled_configs)}")
         
         # Close trajectory files
         for fh in traj_files.values():
