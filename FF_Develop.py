@@ -7698,7 +7698,8 @@ class FF_Optimizer(Optimizer):
         i_index = model_info.i_indexes
         j_index = model_info.j_indexes
         #ntotal = number of forces
-        fg = compute_obj.find_derivative_gradient() #shape = (npars, ntotal)
+        # F = -dU/dr, so dF/dθ = -d²U/(dr·dθ)
+        fg = -compute_obj.find_derivative_gradient() #shape = (npars, ntotal)
         nf = fg.shape[1]
         if model_info.category == 'PW' or model_info.category == 'BO':
             for n in range(n_pars):
