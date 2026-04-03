@@ -684,7 +684,7 @@ class ActiveLearningPipeline:
         
         # Create Langevin dynamics integrator with fixed atom types
         fixed_types = self.al_config.fixed_types
-        langevin = LangevinDynamics(self.optimizer, self.al_config, mass_map, fixed_types)
+        langevin = LangevinDynamics(self.setup, self.al_config, mass_map, fixed_types)
         
         # Select initial configurations for MD
         n_init = min(self.al_config.md_initial_configs, len(data))
@@ -1329,8 +1329,8 @@ class LangevinDynamics:
     
     Parameters
     ----------
-    optimizer : FF_Optimizer
-        Force field optimizer with trained models.
+    setup : Setup_Interfacial_Optimization
+        Setup object containing opt_models with trained parameters.
     al_config : ActiveLearningConfig
         Configuration containing MD parameters.
     mass_map : dict
@@ -1343,11 +1343,12 @@ class LangevinDynamics:
     KB_KCAL = 0.001987204  # Boltzmann constant in kcal/(mol·K)
     AMU_TO_KCAL_FS2_A2 = 0.0004184  # 1 amu·Å²/fs² = 0.0004184 kcal/mol
     
-    def __init__(self, optimizer , al_config, mass_map, fixed_types=None):
-        self.optimizer = optimizer
+    def __init__(self, setup, al_config, mass_map, fixed_types=None):
+        self.setup = setup
         self.al_config = al_config
         self.mass_map = mass_map
         self.fixed_types = fixed_types if fixed_types else []
+        self.optimizer = None  # Created in integrate() with proper data
         
         # MD parameters
         self.dt = al_config.md_timestep  # fs
@@ -1382,25 +1383,21 @@ class LangevinDynamics:
         # Convert back to Cartesian
         return np.dot(frac, lattice)
     
-    def _compute_forces(self, data, which='opt'):
+    def _compute_forces(self, which='opt'):
         """Compute forces for all configurations in data."""
-        models = getattr(self.optimizer.setup, which + '_models')
+        models = getattr(self.setup, which + '_models')
         params, bounds, fixed_params, isnot_fixed, reguls = self.optimizer.get_parameter_info(models)
         
         # Rebuild interactions
-        ff.al_help.make_interactions(data, self.optimizer.setup)
+        ff.al_help.make_interactions(self.optimizer.data, self.setup)
         
-        natoms_per_point = data['natoms'].to_numpy()
+        natoms_per_point = self.optimizer.data['natoms'].to_numpy()
         models_list_info = self.optimizer.get_list_of_model_information(models, 'all')
         
         Forces_tot = self.optimizer.computeForceClass(params, np.sum(natoms_per_point), models_list_info)
         
         # Split forces by configuration
         forces_dict = {}
-        for m, model_info in enumerate(models_list_info):
-            nat_low = model_info.nat_low
-            nat_up = model_info.nat_up
-            break  # Only need first model_info for indexing
         
         offset = 0
         for m, natoms in enumerate(natoms_per_point):
@@ -1435,6 +1432,10 @@ class LangevinDynamics:
         data = init_data.iloc[:n_configs].copy()
         data = data.reset_index(drop=True)
         
+        # Create FF_Optimizer with the selected data (needed for proper indexing)
+        all_indexes = data.index.to_numpy()
+        self.optimizer = ff.FF_Optimizer(data, all_indexes, all_indexes, self.setup)
+        
         # Initialize velocities from Maxwell-Boltzmann (only for mobile atoms)
         velocities = {}
         mobile_masks = {}
@@ -1465,8 +1466,11 @@ class LangevinDynamics:
         print(f"Running Langevin dynamics: {n_steps} steps, dt={self.dt} fs, T={self.temperature} K")
         print(f"Sampling every {sample_interval} steps ({self.sampling_time} fs)")
         
+        # Reference to optimizer's data (same object, updated in place)
+        data = self.optimizer.data
+        
         # Compute initial forces
-        forces = self._compute_forces(data)
+        forces = self._compute_forces()
         
         for step in range(n_steps):
             # BAOAB integrator
@@ -1501,16 +1505,16 @@ class LangevinDynamics:
                 if lattice is not None:
                     coords = self._apply_pbc(coords, lattice)
                 
-                # Update data
-                data.at[idx, 'coords'] = coords
+                # Update data in optimizer
+                self.optimizer.data.at[idx, 'coords'] = coords
                 velocities[idx] = vel
             
             # Clear old interactions before recomputing forces
-            if 'descriptor_info' in data.columns:
-                data.drop(columns=['descriptor_info', 'interactions'], inplace=True, errors='ignore')
+            if 'descriptor_info' in self.optimizer.data.columns:
+                self.optimizer.data.drop(columns=['descriptor_info', 'interactions'], inplace=True, errors='ignore')
             
             # A: Compute new forces (after position update)
-            forces = self._compute_forces(data)
+            forces = self._compute_forces()
             
             # Final half kick (only mobile atoms)
             for idx in data.index:
@@ -1528,11 +1532,11 @@ class LangevinDynamics:
             if (step + 1) % sample_interval == 0:
                 for idx in data.index:
                     sampled_configs.append({
-                        'coords': copy.deepcopy(data.loc[idx, 'coords']),
-                        'at_type': data.loc[idx, 'at_type'],
-                        'natoms': data.loc[idx, 'natoms'],
-                        'lattice': data.loc[idx, 'lattice'] if 'lattice' in data.columns else None,
-                        'sys_name': data.loc[idx, 'sys_name'] if 'sys_name' in data.columns else f'md_{idx}',
+                        'coords': copy.deepcopy(self.optimizer.data.loc[idx, 'coords']),
+                        'at_type': self.optimizer.data.loc[idx, 'at_type'],
+                        'natoms': self.optimizer.data.loc[idx, 'natoms'],
+                        'lattice': self.optimizer.data.loc[idx, 'lattice'] if 'lattice' in self.optimizer.data.columns else None,
+                        'sys_name': self.optimizer.data.loc[idx, 'sys_name'] if 'sys_name' in self.optimizer.data.columns else f'md_{idx}',
                         'step': step + 1,
                         'time_fs': (step + 1) * self.dt,
                     })
