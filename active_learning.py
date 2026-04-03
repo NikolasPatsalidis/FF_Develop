@@ -1475,7 +1475,7 @@ class LangevinDynamics:
         for step in range(n_steps):
             # BAOAB integrator
             for idx in data.index:
-                coords = data.loc[idx, 'coords'].copy()
+                coords = np.array(data.loc[idx, 'coords'], dtype=float)
                 vel = velocities[idx].copy()
                 force = forces[idx]
                 at_types = data.loc[idx, 'at_type']
