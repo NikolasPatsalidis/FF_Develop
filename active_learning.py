@@ -1529,6 +1529,15 @@ class LangevinDynamics:
         # Compute initial forces and energies
         forces = self._compute_forces()
         
+        # Validate forces in first step using test_ForceClass
+        print("Validating analytical vs numerical forces...")
+        _, max_diff = self.optimizer.test_ForceClass(which='opt', epsilon=1e-4, verbose=True, 
+                                                      random_tries=3, order=4)
+        force_tol = 1e-2  # tolerance in kcal/(mol·Å)
+        if max_diff > force_tol:
+            raise RuntimeError(f"Force validation FAILED! max_diff={max_diff:.4e} > tol={force_tol:.4e}. "
+                             f"Analytical forces do not match numerical gradients of U.")
+        
         # Write initial frame (step 0) if saving trajectories
         if save_traj != 'no':
             energies = self._compute_energies()

@@ -7956,7 +7956,7 @@ class FF_Optimizer(Optimizer):
                 mean_force = np.abs(fa).mean()
                 if verbose:
                     print('point {:d} max_force = {:4.3e} mean_force = {:4.3e} min_force = {:4.3e}'.format(m,max_force,mean_force,min_force))
-            return Forces_analytical
+            return Forces_analytical, None  # Return None for max_diff when skipping numerical check
         # Numerical gradient calculation
         
         Forces_numerical =  {m: np.zeros( (natoms,3),dtype=float) for m, natoms in enumerate(natoms_per_point) }
@@ -8060,8 +8060,9 @@ class FF_Optimizer(Optimizer):
             print('random try {:d} --> max diff = {:4.3e}, mean diff = {:4.3e}'.format(random_try,dmax,dmean))
             all_diffs.extend(differences)
         a = where_max_diff[np.argmax(all_diffs)]
-        print('Max diff: {:4.3e} at {}'.format(np.max(all_diffs),a))
-        return  Forces_analytical
+        max_diff = np.max(all_diffs)
+        print('Max diff: {:4.3e} at {}'.format(max_diff, a))
+        return Forces_analytical, max_diff
     
     def test_gradUclass(self, which='opt', dataset='all', epsilon=1e-4, order=2):
         """
