@@ -312,7 +312,9 @@ def extract_forces(lines):
         # Start of a new force block
         if "Forces acting on atoms" in line:
             if reading and current_block:
-                forces.append(np.array(current_block, dtype=float)*convertion)
+                # QE outputs forces as F = -dE/dR (physical forces)
+                # We store them with same convention (negative gradient)
+                forces.append(-np.array(current_block, dtype=float)*convertion)
                 current_block = []
             reading = True
             continue
@@ -320,7 +322,7 @@ def extract_forces(lines):
         # End of a force block (optional but safer)
         if reading and "Total force" in line:
             if current_block:
-                forces.append(np.array(current_block, dtype=float)*convertion)
+                forces.append(-np.array(current_block, dtype=float)*convertion)
                 current_block = []
             reading = False
             continue
@@ -334,7 +336,7 @@ def extract_forces(lines):
 
     # Catch last block if file doesn't end with "Total force"
     if reading and current_block:
-        forces.append(np.array(current_block, dtype=float)*convertion )
+        forces.append(-np.array(current_block, dtype=float)*convertion)
 
     return forces
 

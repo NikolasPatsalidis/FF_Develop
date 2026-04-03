@@ -7502,6 +7502,69 @@ class FF_Optimizer(Optimizer):
         
         return  models_list
     
+    def analyze_angle_data(self, which='opt', dataset='all'):
+        """Analyze angle distribution in training data to diagnose fitting issues.
+        
+        Returns statistics about angle values and corresponding forces for each angle type.
+        """
+        models = getattr(self.setup, which + '_models')
+        descriptor_info = self.data['descriptor_info']
+        
+        print("\n" + "="*60)
+        print("ANGLE DATA ANALYSIS")
+        print("="*60)
+        
+        for name, model in models.items():
+            if model.category != 'AN':
+                continue
+            
+            angle_type = model.type
+            th0 = model.parameters[0]
+            k = model.parameters[1]
+            
+            # Collect all angles for this type
+            all_angles = []
+            for idx, val in descriptor_info.items():
+                if 'angles' in val and angle_type in val['angles']:
+                    angles = val['angles'][angle_type]['values']
+                    all_angles.extend(angles)
+            
+            if len(all_angles) == 0:
+                print(f"\n{name}: NO DATA for angle type {angle_type}")
+                continue
+            
+            all_angles = np.array(all_angles)
+            
+            print(f"\n{name} ({' '.join(angle_type)}):")
+            print(f"  Current parameters: th0 = {th0:.4f} rad ({np.degrees(th0):.1f}°), k = {k:.4f}")
+            print(f"  N samples: {len(all_angles)}")
+            print(f"  Angle statistics:")
+            print(f"    Mean:   {np.mean(all_angles):.4f} rad ({np.degrees(np.mean(all_angles)):.1f}°)")
+            print(f"    Std:    {np.std(all_angles):.4f} rad ({np.degrees(np.std(all_angles)):.1f}°)")
+            print(f"    Min:    {np.min(all_angles):.4f} rad ({np.degrees(np.min(all_angles)):.1f}°)")
+            print(f"    Max:    {np.max(all_angles):.4f} rad ({np.degrees(np.max(all_angles)):.1f}°)")
+            print(f"    Median: {np.median(all_angles):.4f} rad ({np.degrees(np.median(all_angles)):.1f}°)")
+            
+            # Expected th0 for water H-O-H is ~1.82 rad (104.5°)
+            # Check if data supports current th0 or expected value
+            residuals_current = all_angles - th0
+            residuals_expected = all_angles - 1.82  # ~104.5° for water
+            
+            print(f"  Residuals from current th0 ({np.degrees(th0):.1f}°):")
+            print(f"    Mean: {np.mean(residuals_current):.4f}, Std: {np.std(residuals_current):.4f}")
+            print(f"  Residuals from expected th0 (104.5°):")
+            print(f"    Mean: {np.mean(residuals_expected):.4f}, Std: {np.std(residuals_expected):.4f}")
+            
+            # Histogram bins
+            hist, bin_edges = np.histogram(np.degrees(all_angles), bins=10)
+            print(f"  Angle histogram (degrees):")
+            for i in range(len(hist)):
+                bar = '*' * min(hist[i], 50)
+                print(f"    [{bin_edges[i]:6.1f}-{bin_edges[i+1]:6.1f}]: {hist[i]:4d} {bar}")
+        
+        print("\n" + "="*60)
+        return
+
     def set_UFclass_ondata(self,which='opt',dataset='all'):
         """Compute and store classical energies and forces on the dataset."""
         
@@ -7698,7 +7761,8 @@ class FF_Optimizer(Optimizer):
         i_index = model_info.i_indexes
         j_index = model_info.j_indexes
         #ntotal = number of forces
-        fg = compute_obj.find_derivative_gradient() #shape = (npars, ntotal)
+        # F = -dU/dr, so dF/dθ = -d²U/(dr·dθ)
+        fg = -compute_obj.find_derivative_gradient() #shape = (npars, ntotal)
         nf = fg.shape[1]
         if model_info.category == 'PW' or model_info.category == 'BO':
             for n in range(n_pars):
@@ -7741,7 +7805,9 @@ class FF_Optimizer(Optimizer):
         i_index = model_info.i_indexes
         j_index = model_info.j_indexes
        
-        dudx_vectorized = compute_obj.find_dydx()
+        # F = -dU/dr (physical force is negative gradient of potential)
+        # find_dydx() returns +dU/dr, so we negate to get force convention
+        dudx_vectorized = -compute_obj.find_dydx()
         dudx_vectorized = dudx_vectorized.reshape((dudx_vectorized.shape[0],1))
         
         if model_info.category == 'PW' or model_info.category == 'BO':
@@ -7886,7 +7952,8 @@ class FF_Optimizer(Optimizer):
    
     def test_ForceClass(self, which='opt', epsilon=1e-4,  seed = 2024,
                         verbose=False,random_tries=10,
-                        check_only_analytical_forces=False,order=4):
+                        check_only_analytical_forces=False,order=4,
+                        mobile_atoms=None):
         """
         Compute and compare the analytical and numerical Forces
         using second order finite difference methods.
@@ -7919,6 +7986,9 @@ class FF_Optimizer(Optimizer):
         order : int, optional
             order of differentiation
             Default is 4
+        mobile_atoms : list or numpy.ndarray, optional
+            List of atom indices to test. If None, random atoms are selected.
+            If provided, only these atoms will be tested on each random try.
         
         """
         dataset='all'
@@ -7956,7 +8026,7 @@ class FF_Optimizer(Optimizer):
                 mean_force = np.abs(fa).mean()
                 if verbose:
                     print('point {:d} max_force = {:4.3e} mean_force = {:4.3e} min_force = {:4.3e}'.format(m,max_force,mean_force,min_force))
-            return Forces_analytical
+            return Forces_analytical, None  # Return None for max_diff when skipping numerical check
         # Numerical gradient calculation
         
         Forces_numerical =  {m: np.zeros( (natoms,3),dtype=float) for m, natoms in enumerate(natoms_per_point) }
@@ -7976,7 +8046,11 @@ class FF_Optimizer(Optimizer):
         seeds = np.random.randint(0,random_tries*1000,size=random_tries)
         for random_try in range(random_tries):
             np.random.seed(seeds[random_try])
-            atoms_to_modify = [np.random.randint(0,natoms) for m, natoms  in enumerate(natoms_per_point)]
+            if mobile_atoms is not None:
+                # Select random atom from mobile_atoms list for each data point
+                atoms_to_modify = [mobile_atoms[np.random.randint(0, len(mobile_atoms))] for m in range(len(natoms_per_point))]
+            else:
+                atoms_to_modify = [np.random.randint(0,natoms) for m, natoms  in enumerate(natoms_per_point)]
             differences = []
             for dir_index in range(3): 
                 
@@ -8030,14 +8104,15 @@ class FF_Optimizer(Optimizer):
                     self.data.drop(columns=['descriptor_info', 'interactions','coords' ], inplace=True)
                     self.data['coords'] = copy.deepcopy(coords_copy)
 
+                # F = -dU/dr, so numerical force = -(dU/dr) = -( (U(r+eps) - U(r-eps)) / 2eps )
                 if order==4:
                     for m in Forces_numerical.keys():
                         atom_index = atoms_to_modify[m]
-                        Forces_numerical[m][atom_index, dir_index] = (-up2[m] + 8 * up1[m] - 8 * um1[m] + um2[m]) / (12 * epsilon)
+                        Forces_numerical[m][atom_index, dir_index] = -(-up2[m] + 8 * up1[m] - 8 * um1[m] + um2[m]) / (12 * epsilon)
                 else:
                     for m in Forces_numerical.keys():
                         atom_index = atoms_to_modify[m]
-                        Forces_numerical[m][atom_index, dir_index] = (up1[m] - um1[m]) / ( 2*epsilon)
+                        Forces_numerical[m][atom_index, dir_index] = -(up1[m] - um1[m]) / ( 2*epsilon)
                 #if verbose:
                 #    print(f'Numerical Forces Calculated. Comparing direction {dir_index}...')
                 
@@ -8060,8 +8135,9 @@ class FF_Optimizer(Optimizer):
             print('random try {:d} --> max diff = {:4.3e}, mean diff = {:4.3e}'.format(random_try,dmax,dmean))
             all_diffs.extend(differences)
         a = where_max_diff[np.argmax(all_diffs)]
-        print('Max diff: {:4.3e} at {}'.format(np.max(all_diffs),a))
-        return  Forces_analytical
+        max_diff = np.max(all_diffs)
+        print('Max diff: {:4.3e} at {}'.format(max_diff, a))
+        return Forces_analytical, max_diff
     
     def test_gradUclass(self, which='opt', dataset='all', epsilon=1e-4, order=2):
         """

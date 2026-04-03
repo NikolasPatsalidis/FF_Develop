@@ -140,6 +140,7 @@ class ActiveLearningConfig(ConfigBase):
         'md_timestep': 1.0,                   # timestep in fs
         'md_integration_time': 1000.0,        # total integration time in fs
         'md_sampling_time': 10.0,             # store configurations every this many fs
+        'md_save_traj': 'no',                 # 'no', 'sampled', 'full' - save trajectory to xyz
     }
     
     def __init__(self):
@@ -549,8 +550,6 @@ class ActiveLearningPipeline:
         n_after_qe = len(data)
         print(f'After QE quality filtering: {n_initial} -> {n_after_qe} configs')
         
-        # Step 2: Clean well-separated structures (disconnected clusters)
-        data = self.al.clean_well_separated_nanostructures(data, self.al_config.forbidden_separation)
         
         filt_clean = False
         for uns in np.unique(data['sys_name']):
@@ -563,6 +562,9 @@ class ActiveLearningPipeline:
         data = data[ np.logical_not(filt_clean) ]
         n_ener_filt = len(data)
         print(f'After energy maximum threshold filtering: {n_after_qe} -> {n_ener_filt} configs')
+        
+        # Step 2: Clean well-separated structures (disconnected clusters)
+        data = self.al.clean_well_separated_nanostructures(data, self.al_config.forbidden_separation)
         
         # Step 3: Standard FF cleaning
         data = self.al.clean_data(data, self.setup, self.beta_sampling)
@@ -630,7 +632,7 @@ class ActiveLearningPipeline:
         if sampling_method == 'perturbation':
             candidate_data = self.al.make_random_petrubations(data, sigma=self.sigma)
         elif sampling_method == 'md':
-            candidate_data = self._sample_via_langevin(data)
+            candidate_data = self._sample_via_langevin(data, iteration)
         elif sampling_method == 'mc':
             candidate_data  = self.al.MC_sample( data, self.setup, self.al_config )
             
@@ -655,13 +657,15 @@ class ActiveLearningPipeline:
         
         return selected_data
     
-    def _sample_via_langevin(self, data):
+    def _sample_via_langevin(self, data, iteration):
         """Sample configurations using internal Langevin dynamics.
         
         Parameters
         ----------
         data : pd.DataFrame
             Current training data to start MD from.
+        iteration : int
+            Current iteration number for trajectory file naming.
         Returns
         -------
         candidate_data : pd.DataFrame
@@ -684,7 +688,7 @@ class ActiveLearningPipeline:
         
         # Create Langevin dynamics integrator with fixed atom types
         fixed_types = self.al_config.fixed_types
-        langevin = LangevinDynamics(self.optimizer, self.al_config, mass_map, fixed_types)
+        langevin = LangevinDynamics(self.setup, self.al_config, mass_map, fixed_types)
         
         # Select initial configurations for MD
         n_init = min(self.al_config.md_initial_configs, len(data))
@@ -696,12 +700,16 @@ class ActiveLearningPipeline:
             if col not in init_data.columns:
                 raise ValueError(f"Data missing required column: {col}")
         
-        # Run Langevin dynamics
-        sampled_df = langevin.integrate(init_data, n_configs=n_init)
+        # Run Langevin dynamics with trajectory saving option
+        save_traj = self.al_config.md_save_traj
+        sampled_df = langevin.integrate(
+            init_data, n_configs=n_init, iteration=iteration,
+            save_traj=save_traj, output_dir=self.setup.runpath
+        )
         
         # Convert to format expected by rest of pipeline
-        # Keep only columns needed for DFT preparation
-        candidate_data = sampled_df[['coords', 'at_type', 'natoms', 'lattice', 'sys_name']].copy()
+        # Keep columns needed for DFT preparation plus Uclass
+        candidate_data = sampled_df[['coords', 'at_type', 'natoms', 'lattice', 'sys_name', 'Uclass']].copy()
         
         return candidate_data
     
@@ -1329,8 +1337,8 @@ class LangevinDynamics:
     
     Parameters
     ----------
-    optimizer : FF_Optimizer
-        Force field optimizer with trained models.
+    setup : Setup_Interfacial_Optimization
+        Setup object containing opt_models with trained parameters.
     al_config : ActiveLearningConfig
         Configuration containing MD parameters.
     mass_map : dict
@@ -1341,13 +1349,16 @@ class LangevinDynamics:
     
     # Conversion factors
     KB_KCAL = 0.001987204  # Boltzmann constant in kcal/(mol·K)
-    AMU_TO_KCAL_FS2_A2 = 0.0004184  # 1 amu·Å²/fs² = 0.0004184 kcal/mol
+    # 1 kcal/mol = 0.0004184 amu·(Å/fs)² (for converting energy to mass*velocity²)
+    # Equivalently: 1 amu·(Å/fs)² = 2390 kcal/mol
+    KCAL_TO_AMU_A2_FS2 = 0.0004184
     
-    def __init__(self, optimizer , al_config, mass_map, fixed_types=None):
-        self.optimizer = optimizer
+    def __init__(self, setup, al_config, mass_map, fixed_types=None):
+        self.setup = setup
         self.al_config = al_config
         self.mass_map = mass_map
         self.fixed_types = fixed_types if fixed_types else []
+        self.optimizer = None  # Created in integrate() with proper data
         
         # MD parameters
         self.dt = al_config.md_timestep  # fs
@@ -1371,36 +1382,31 @@ class LangevinDynamics:
         return np.array([at not in self.fixed_types for at in at_types])
     
     def _apply_pbc(self, coords, lattice):
-        """Wrap coordinates into primary cell using PBC."""
-        if lattice is None:
-            return coords
-        inv_lattice = np.linalg.inv(lattice)
-        # Convert to fractional
-        frac = np.dot(coords, inv_lattice)
-        # Wrap to [0, 1)
-        frac = frac - np.floor(frac)
-        # Convert back to Cartesian
-        return np.dot(frac, lattice)
+        """Wrap coordinates into primary cell using PBC.
+        
+        NOTE: For molecular systems, per-atom wrapping breaks connectivity.
+        This is disabled for now - forces are computed with MIC automatically.
+        For interfacial systems, molecules should stay near the surface.
+        """
+        # Don't wrap individual atoms - this breaks molecules!
+        # The force field handles MIC correctly in make_interactions.
+        return coords
     
-    def _compute_forces(self, data, which='opt'):
+    def _compute_forces(self, which='opt'):
         """Compute forces for all configurations in data."""
-        models = getattr(self.optimizer.setup, which + '_models')
+        models = getattr(self.setup, which + '_models')
         params, bounds, fixed_params, isnot_fixed, reguls = self.optimizer.get_parameter_info(models)
         
         # Rebuild interactions
-        ff.al_help.make_interactions(data, self.optimizer.setup)
+        ff.al_help.make_interactions(self.optimizer.data, self.setup)
         
-        natoms_per_point = data['natoms'].to_numpy()
+        natoms_per_point = self.optimizer.data['natoms'].to_numpy()
         models_list_info = self.optimizer.get_list_of_model_information(models, 'all')
         
         Forces_tot = self.optimizer.computeForceClass(params, np.sum(natoms_per_point), models_list_info)
         
         # Split forces by configuration
         forces_dict = {}
-        for m, model_info in enumerate(models_list_info):
-            nat_low = model_info.nat_low
-            nat_up = model_info.nat_up
-            break  # Only need first model_info for indexing
         
         offset = 0
         for m, natoms in enumerate(natoms_per_point):
@@ -1409,7 +1415,36 @@ class LangevinDynamics:
             
         return forces_dict
     
-    def integrate(self, init_data, n_configs=None):
+    def _compute_energies(self, which='opt'):
+        """Compute classical energies for all configurations in data."""
+        models = getattr(self.setup, which + '_models')
+        params, bounds, fixed_params, isnot_fixed, reguls = self.optimizer.get_parameter_info(models)
+        
+        # Rebuild interactions with MIC (if not already done by _compute_forces)
+        if 'descriptor_info' not in self.optimizer.data.columns:
+            ff.al_help.make_interactions(self.optimizer.data, self.setup)
+        
+        ndata = len(self.optimizer.data)
+        models_list_info = self.optimizer.get_list_of_model_information(models, 'all')
+        
+        Uclass = self.optimizer.computeUclass(params, ndata, models_list_info)
+        
+        # Return as dict keyed by index
+        return {idx: Uclass[i] for i, idx in enumerate(self.optimizer.data.index)}
+    
+    def _write_xyz_frame(self, fh, coords, at_types, lattice=None, comment=''):
+        """Write a single XYZ frame to file handle."""
+        natoms = len(at_types)
+        fh.write(f"{natoms}\n")
+        if lattice is not None:
+            lat_str = ' '.join([f"{x:.6f}" for row in lattice for x in row])
+            fh.write(f"Lattice=\"{lat_str}\" {comment}\n")
+        else:
+            fh.write(f"{comment}\n")
+        for at, xyz in zip(at_types, coords):
+            fh.write(f"{at} {xyz[0]:.6f} {xyz[1]:.6f} {xyz[2]:.6f}\n")
+    
+    def integrate(self, init_data, n_configs=None, iteration=0, save_traj='no', output_dir='.'):
         """Run Langevin dynamics and sample configurations.
         
         Parameters
@@ -1418,6 +1453,14 @@ class LangevinDynamics:
             Initial configurations with columns: coords, at_type, natoms, lattice (optional).
         n_configs : int, optional
             Number of configs to start from. If None, use all.
+        iteration : int, optional
+            Current iteration number for trajectory file naming.
+        save_traj : str, optional
+            'no' - don't save trajectories
+            'sampled' - save only sampled frames
+            'full' - save all frames
+        output_dir : str, optional
+            Directory to save trajectory files.
             
         Returns
         -------
@@ -1435,6 +1478,10 @@ class LangevinDynamics:
         data = init_data.iloc[:n_configs].copy()
         data = data.reset_index(drop=True)
         
+        # Create FF_Optimizer with the selected data (needed for proper indexing)
+        all_indexes = data.index.to_numpy()
+        self.optimizer = ff.FF_Optimizer(data, all_indexes, all_indexes, self.setup)
+        
         # Initialize velocities from Maxwell-Boltzmann (only for mobile atoms)
         velocities = {}
         mobile_masks = {}
@@ -1446,7 +1493,8 @@ class LangevinDynamics:
             mobile_masks[idx] = mobile_mask
             
             # v = sqrt(kT/m) * random_normal, but zero for fixed atoms
-            sigma_v = np.sqrt(self.KB_KCAL * self.temperature / (masses * self.AMU_TO_KCAL_FS2_A2))
+            # sigma_v² = k_B*T * conversion / m, where conversion: kcal/mol -> amu·(Å/fs)²
+            sigma_v = np.sqrt(self.KB_KCAL * self.temperature * self.KCAL_TO_AMU_A2_FS2 / masses)
             vel = np.random.randn(natoms, 3) * sigma_v[:, np.newaxis]
             vel[~mobile_mask] = 0.0  # Zero velocity for fixed atoms
             velocities[idx] = vel
@@ -1465,13 +1513,69 @@ class LangevinDynamics:
         print(f"Running Langevin dynamics: {n_steps} steps, dt={self.dt} fs, T={self.temperature} K")
         print(f"Sampling every {sample_interval} steps ({self.sampling_time} fs)")
         
-        # Compute initial forces
-        forces = self._compute_forces(data)
+        # Reference to optimizer's data (same object, updated in place)
+        data = self.optimizer.data
+        
+        # Setup trajectory file handles if saving
+        traj_files = {}
+        if save_traj != 'no':
+            import os
+            traj_dir = os.path.join(output_dir, f'iter{iteration}')
+            os.makedirs(traj_dir, exist_ok=True)
+            for idx in data.index:
+                traj_path = os.path.join(traj_dir, f'traj_{save_traj}_{idx}.xyz')
+                traj_files[idx] = open(traj_path, 'w')
+            print(f"Saving {save_traj} trajectories to {traj_dir}")
+        
+        # Compute initial forces and energies
+        forces = self._compute_forces()
+        
+        # Validate forces in first step using test_ForceClass (only on mobile atoms)
+        # Get mobile atom indices from first config
+        first_idx = data.index[0]
+        mobile_atom_indices = np.where(mobile_masks[first_idx])[0].tolist()
+        
+        print(f"Validating analytical vs numerical forces on {len(mobile_atom_indices)} mobile atoms... mobile indices = {mobile_atom_indices}")
+        _, max_diff = self.optimizer.test_ForceClass(which='opt', epsilon=1e-4, verbose=True, 
+                                                      random_tries=3, order=4,
+                                                      mobile_atoms=mobile_atom_indices)
+        force_tol = 1e-2  # tolerance in kcal/(mol·Å)
+        if max_diff > force_tol:
+            raise RuntimeError(f"Force validation FAILED! max_diff={max_diff:.4e} > tol={force_tol:.4e}. "
+                             f"Analytical forces do not match numerical gradients of U.")
+        
+        # Write initial frame (step 0) if saving trajectories
+        if save_traj != 'no':
+            energies = self._compute_energies()
+            for idx in data.index:
+                coords = np.array(self.optimizer.data.loc[idx, 'coords'], dtype=float)
+                at_types = self.optimizer.data.loc[idx, 'at_type']
+                lattice = self.optimizer.data.loc[idx, 'lattice'] if 'lattice' in self.optimizer.data.columns else None
+                comment = f"step=0 time_fs=0.00 Uclass={energies[idx]:.4f} (initial)"
+                self._write_xyz_frame(traj_files[idx], coords, at_types, lattice, comment)
+        
+        # Also store initial configuration in sampled_configs
+        energies = self._compute_energies()
+        for idx in data.index:
+            coords = np.array(self.optimizer.data.loc[idx, 'coords'], dtype=float)
+            at_types = self.optimizer.data.loc[idx, 'at_type']
+            lattice = self.optimizer.data.loc[idx, 'lattice'] if 'lattice' in self.optimizer.data.columns else None
+            sys_name = self.optimizer.data.loc[idx, 'sys_name'] if 'sys_name' in self.optimizer.data.columns else f'md_{idx}'
+            sampled_configs.append({
+                'coords': copy.deepcopy(coords),
+                'at_type': at_types,
+                'natoms': self.optimizer.data.loc[idx, 'natoms'],
+                'lattice': lattice,
+                'sys_name': sys_name,
+                'step': 0,
+                'time_fs': 0.0,
+                'Uclass': energies[idx],
+            })
         
         for step in range(n_steps):
             # BAOAB integrator
             for idx in data.index:
-                coords = data.loc[idx, 'coords'].copy()
+                coords = np.array(data.loc[idx, 'coords'], dtype=float)
                 vel = velocities[idx].copy()
                 force = forces[idx]
                 at_types = data.loc[idx, 'at_type']
@@ -1479,18 +1583,21 @@ class LangevinDynamics:
                 lattice = data.loc[idx, 'lattice'] if 'lattice' in data.columns else None
                 mobile = mobile_masks[idx]
                 
-                # Mass array for vectorized ops
-                m_inv = 1.0 / (masses * self.AMU_TO_KCAL_FS2_A2)  # 1/(amu * conversion)
+                # Mass array for vectorized ops: a = F * conversion / m
+                # F is in kcal/(mol·Å), convert to amu·Å/fs² then divide by mass
+                m_inv = self.KCAL_TO_AMU_A2_FS2 / masses
                 m_inv = m_inv[:, np.newaxis]
                 
                 # A: half kick (only mobile atoms)
+                # Force field now returns physical force F = -dU/dr (fixed in ForcesPerModel)
+                # Standard velocity update: v = v + F/m * dt
                 vel[mobile] = vel[mobile] + 0.5 * self.dt * force[mobile] * m_inv[mobile]
                 
                 # B: half drift (only mobile atoms)
                 coords[mobile] = coords[mobile] + 0.5 * self.dt * vel[mobile]
                 
                 # O: Ornstein-Uhlenbeck thermostat (only mobile atoms)
-                sigma_v = np.sqrt(self.KB_KCAL * self.temperature / (masses * self.AMU_TO_KCAL_FS2_A2))
+                sigma_v = np.sqrt(self.KB_KCAL * self.temperature * self.KCAL_TO_AMU_A2_FS2 / masses)
                 noise = np.random.randn(len(masses), 3) * sigma_v[:, np.newaxis]
                 vel[mobile] = self.c1 * vel[mobile] + self.c2 * noise[mobile]
                 
@@ -1501,16 +1608,16 @@ class LangevinDynamics:
                 if lattice is not None:
                     coords = self._apply_pbc(coords, lattice)
                 
-                # Update data
-                data.at[idx, 'coords'] = coords
+                # Update data in optimizer
+                self.optimizer.data.at[idx, 'coords'] = coords
                 velocities[idx] = vel
             
             # Clear old interactions before recomputing forces
-            if 'descriptor_info' in data.columns:
-                data.drop(columns=['descriptor_info', 'interactions'], inplace=True, errors='ignore')
+            if 'descriptor_info' in self.optimizer.data.columns:
+                self.optimizer.data.drop(columns=['descriptor_info', 'interactions'], inplace=True, errors='ignore')
             
             # A: Compute new forces (after position update)
-            forces = self._compute_forces(data)
+            forces = self._compute_forces()
             
             # Final half kick (only mobile atoms)
             for idx in data.index:
@@ -1519,26 +1626,58 @@ class LangevinDynamics:
                 at_types = data.loc[idx, 'at_type']
                 masses = self._get_masses(at_types)
                 mobile = mobile_masks[idx]
-                m_inv = 1.0 / (masses * self.AMU_TO_KCAL_FS2_A2)
+                m_inv = self.KCAL_TO_AMU_A2_FS2 / masses
                 m_inv = m_inv[:, np.newaxis]
+                # Force field now returns physical force F = -dU/dr
                 vel[mobile] = vel[mobile] + 0.5 * self.dt * force[mobile] * m_inv[mobile]
                 velocities[idx] = vel
             
-            # Sample configurations
-            if (step + 1) % sample_interval == 0:
+            # Write full trajectory if requested
+            if save_traj == 'full':
+                energies = self._compute_energies()
                 for idx in data.index:
+                    coords = np.array(self.optimizer.data.loc[idx, 'coords'], dtype=float)
+                    at_types = self.optimizer.data.loc[idx, 'at_type']
+                    lattice = self.optimizer.data.loc[idx, 'lattice'] if 'lattice' in self.optimizer.data.columns else None
+                    comment = f"step={step+1} time_fs={(step+1)*self.dt:.2f} Uclass={energies[idx]:.4f}"
+                    self._write_xyz_frame(traj_files[idx], coords, at_types, lattice, comment)
+            
+            # Sample configurations
+            is_sample_step = (step + 1) % sample_interval == 0
+            if is_sample_step:
+                energies = self._compute_energies()
+                for idx in data.index:
+                    coords = np.array(self.optimizer.data.loc[idx, 'coords'], dtype=float)
+                    at_types = self.optimizer.data.loc[idx, 'at_type']
+                    lattice = self.optimizer.data.loc[idx, 'lattice'] if 'lattice' in self.optimizer.data.columns else None
+                    sys_name = self.optimizer.data.loc[idx, 'sys_name'] if 'sys_name' in self.optimizer.data.columns else f'md_{idx}'
+                    
                     sampled_configs.append({
-                        'coords': copy.deepcopy(data.loc[idx, 'coords']),
-                        'at_type': data.loc[idx, 'at_type'],
-                        'natoms': data.loc[idx, 'natoms'],
-                        'lattice': data.loc[idx, 'lattice'] if 'lattice' in data.columns else None,
-                        'sys_name': data.loc[idx, 'sys_name'] if 'sys_name' in data.columns else f'md_{idx}',
+                        'coords': copy.deepcopy(coords),
+                        'at_type': at_types,
+                        'natoms': self.optimizer.data.loc[idx, 'natoms'],
+                        'lattice': lattice,
+                        'sys_name': sys_name,
                         'step': step + 1,
                         'time_fs': (step + 1) * self.dt,
+                        'Uclass': energies[idx],
                     })
                     
-            if (step + 1) % 100 == 0:
-                print(f"  Step {step + 1}/{n_steps}, sampled {len(sampled_configs)} configs")
+                    # Write sampled trajectory if requested
+                    if save_traj == 'sampled':
+                        comment = f"step={step+1} time_fs={(step+1)*self.dt:.2f} Uclass={energies[idx]:.4f}"
+                        self._write_xyz_frame(traj_files[idx], coords, at_types, lattice, comment)
+                    
+            if (step + 1) % 10 == 0:
+                # Get max velocity and force for monitoring
+                max_vel = max(np.abs(velocities[idx]).max() for idx in data.index)
+                max_force = max(np.abs(forces[idx]).max() for idx in data.index)
+                v_thermal = np.sqrt(self.KB_KCAL * self.temperature * self.KCAL_TO_AMU_A2_FS2 / 1.008)
+                print(f"  Step {step + 1}/{n_steps} | v_max={max_vel:.4f} Å/fs (v_th (H) ~{v_thermal:.4f}) | F_max={max_force:.2f} kcal/mol/Å | configs={len(sampled_configs)}")
+        
+        # Close trajectory files
+        for fh in traj_files.values():
+            fh.close()
         
         print(f"Langevin dynamics complete. Sampled {len(sampled_configs)} configurations.")
         return pd.DataFrame(sampled_configs)
