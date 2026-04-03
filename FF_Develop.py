@@ -7741,7 +7741,9 @@ class FF_Optimizer(Optimizer):
         i_index = model_info.i_indexes
         j_index = model_info.j_indexes
        
-        dudx_vectorized = compute_obj.find_dydx()
+        # F = -dU/dr (physical force is negative gradient of potential)
+        # find_dydx() returns +dU/dr, so we negate to get force convention
+        dudx_vectorized = -compute_obj.find_dydx()
         dudx_vectorized = dudx_vectorized.reshape((dudx_vectorized.shape[0],1))
         
         if model_info.category == 'PW' or model_info.category == 'BO':
@@ -8030,14 +8032,15 @@ class FF_Optimizer(Optimizer):
                     self.data.drop(columns=['descriptor_info', 'interactions','coords' ], inplace=True)
                     self.data['coords'] = copy.deepcopy(coords_copy)
 
+                # F = -dU/dr, so numerical force = -(dU/dr) = -( (U(r+eps) - U(r-eps)) / 2eps )
                 if order==4:
                     for m in Forces_numerical.keys():
                         atom_index = atoms_to_modify[m]
-                        Forces_numerical[m][atom_index, dir_index] = (-up2[m] + 8 * up1[m] - 8 * um1[m] + um2[m]) / (12 * epsilon)
+                        Forces_numerical[m][atom_index, dir_index] = -(-up2[m] + 8 * up1[m] - 8 * um1[m] + um2[m]) / (12 * epsilon)
                 else:
                     for m in Forces_numerical.keys():
                         atom_index = atoms_to_modify[m]
-                        Forces_numerical[m][atom_index, dir_index] = (up1[m] - um1[m]) / ( 2*epsilon)
+                        Forces_numerical[m][atom_index, dir_index] = -(up1[m] - um1[m]) / ( 2*epsilon)
                 #if verbose:
                 #    print(f'Numerical Forces Calculated. Comparing direction {dir_index}...')
                 
