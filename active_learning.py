@@ -1609,8 +1609,10 @@ class LangevinDynamics:
                 m_inv = m_inv[:, np.newaxis]
                 
                 # A: half kick (only mobile atoms)
+                # NOTE: force field returns gradient (dU/dr), not force (F = -dU/dr)
+                # So we SUBTRACT instead of add: v = v - (dU/dr)/m * dt
                 vel_before_kick = vel[mobile].copy()
-                vel[mobile] = vel[mobile] + 0.5 * self.dt * force[mobile] * m_inv[mobile]
+                vel[mobile] = vel[mobile] - 0.5 * self.dt * force[mobile] * m_inv[mobile]
                 
                 # Debug velocity at each sub-step
                 if step == 0 and idx == data.index[0]:
@@ -1669,7 +1671,8 @@ class LangevinDynamics:
                 mobile = mobile_masks[idx]
                 m_inv = self.KCAL_TO_AMU_A2_FS2 / masses
                 m_inv = m_inv[:, np.newaxis]
-                vel[mobile] = vel[mobile] + 0.5 * self.dt * force[mobile] * m_inv[mobile]
+                # NOTE: force field returns gradient, so subtract
+                vel[mobile] = vel[mobile] - 0.5 * self.dt * force[mobile] * m_inv[mobile]
                 velocities[idx] = vel
             
             # Write full trajectory if requested
