@@ -1568,6 +1568,31 @@ class LangevinDynamics:
                 lattice = data.loc[idx, 'lattice'] if 'lattice' in data.columns else None
                 mobile = mobile_masks[idx]
                 
+                # Debug output for first few steps
+                if step < 3 and idx == data.index[0]:
+                    print(f"\n=== DEBUG Step {step} ===")
+                    print(f"dt = {self.dt} fs, friction = {self.friction} /fs, T = {self.temperature} K")
+                    print(f"c1 = {self.c1:.6f}, c2 = {self.c2:.6f}")
+                    print(f"Masses (mobile): {masses[mobile]}")
+                    print(f"Initial vel (mobile, Å/fs): max={np.abs(vel[mobile]).max():.6f}")
+                    print(f"Force (mobile, kcal/mol/Å): max={np.abs(force[mobile]).max():.4f}")
+                    accel = force[mobile] * self.KCAL_TO_AMU_A2_FS2 / masses[mobile, np.newaxis]
+                    print(f"Accel (mobile, Å/fs²): max={np.abs(accel).max():.6f}")
+                    print(f"Expected v_thermal (H at {self.temperature}K): {np.sqrt(self.KB_KCAL * self.temperature * self.KCAL_TO_AMU_A2_FS2 / 1.008):.6f} Å/fs")
+                    # Print distances between first few atoms to check geometry
+                    print(f"Coords (first 3 mobile atoms):")
+                    mobile_coords = coords[mobile][:3]
+                    for i, c in enumerate(mobile_coords):
+                        print(f"  Atom {i}: {c}")
+                    if len(mobile_coords) >= 2:
+                        d01 = np.linalg.norm(mobile_coords[0] - mobile_coords[1])
+                        print(f"  Distance 0-1: {d01:.4f} Å")
+                    # Warn if forces are very large
+                    max_force = np.abs(force[mobile]).max()
+                    if max_force > 100:
+                        print(f"WARNING: Large force detected! Max={max_force:.1f} kcal/(mol·Å)")
+                        print(f"  This may cause numerical instability. Consider smaller timestep or energy minimization.")
+                
                 # Mass array for vectorized ops: a = F * conversion / m
                 # F is in kcal/(mol·Å), convert to amu·Å/fs² then divide by mass
                 m_inv = self.KCAL_TO_AMU_A2_FS2 / masses
@@ -1577,6 +1602,7 @@ class LangevinDynamics:
                 vel[mobile] = vel[mobile] + 0.5 * self.dt * force[mobile] * m_inv[mobile]
                 
                 # B: half drift (only mobile atoms)
+                coords_before = coords[mobile].copy()
                 coords[mobile] = coords[mobile] + 0.5 * self.dt * vel[mobile]
                 
                 # O: Ornstein-Uhlenbeck thermostat (only mobile atoms)
@@ -1586,6 +1612,12 @@ class LangevinDynamics:
                 
                 # B: half drift (only mobile atoms)
                 coords[mobile] = coords[mobile] + 0.5 * self.dt * vel[mobile]
+                
+                # Debug: check displacement after first step
+                if step == 0 and idx == data.index[0]:
+                    disp = np.linalg.norm(coords[mobile] - coords_before, axis=1)
+                    print(f"Displacement after step 0 (Å): max={disp.max():.6f}, mean={disp.mean():.6f}")
+                    print(f"Final vel after thermostat (Å/fs): max={np.abs(vel[mobile]).max():.6f}")
                 
                 # Apply PBC if lattice exists
                 if lattice is not None:
