@@ -1572,26 +1572,36 @@ class LangevinDynamics:
                 if step < 300 and idx == data.index[0]:
                     print(f"\n=== DEBUG Step {step} ===")
                     print(f"dt = {self.dt} fs, friction = {self.friction} /fs, T = {self.temperature} K")
-                    print(f"c1 = {self.c1:.6f}, c2 = {self.c2:.6f}")
                     print(f"Masses (mobile): {masses[mobile]}")
                     print(f"Initial vel (mobile, Å/fs): max={np.abs(vel[mobile]).max():.6f}")
                     print(f"Force (mobile, kcal/mol/Å): max={np.abs(force[mobile]).max():.4f}")
-                    accel = force[mobile] * self.KCAL_TO_AMU_A2_FS2 / masses[mobile, np.newaxis]
-                    print(f"Accel (mobile, Å/fs²): max={np.abs(accel).max():.6f}")
                     print(f"Expected v_thermal (H at {self.temperature}K): {np.sqrt(self.KB_KCAL * self.temperature * self.KCAL_TO_AMU_A2_FS2 / 1.008):.6f} Å/fs")
-                    # Print distances between first few atoms to check geometry
-                    print(f"Coords (first 3 mobile atoms):")
-                    mobile_coords = coords[mobile][:3]
-                    for i, c in enumerate(mobile_coords):
-                        print(f"  Atom {i}: {c}")
+                    
+                    # Check force DIRECTION for first O-H bond
+                    mobile_coords = coords[mobile]
+                    mobile_forces = force[mobile]
                     if len(mobile_coords) >= 2:
-                        d01 = np.linalg.norm(mobile_coords[0] - mobile_coords[1])
-                        print(f"  Distance 0-1: {d01:.4f} Å")
-                    # Warn if forces are very large
-                    max_force = np.abs(force[mobile]).max()
-                    if max_force > 100:
-                        print(f"WARNING: Large force detected! Max={max_force:.1f} kcal/(mol·Å)")
-                        print(f"  This may cause numerical instability. Consider smaller timestep or energy minimization.")
+                        # O is atom 0, H is atom 1
+                        r_OH = mobile_coords[1] - mobile_coords[0]  # vector from O to H
+                        d_OH = np.linalg.norm(r_OH)
+                        r_OH_unit = r_OH / d_OH
+                        
+                        # Force on H along O-H direction
+                        F_H = mobile_forces[1]  # Force on H
+                        F_H_along_bond = np.dot(F_H, r_OH_unit)  # + means pushing H away from O
+                        
+                        print(f"O-H bond analysis:")
+                        print(f"  Distance O-H: {d_OH:.4f} Å (equilibrium ~0.96 Å)")
+                        print(f"  r_OH vector: {r_OH}")
+                        print(f"  Force on H: {F_H}")
+                        print(f"  F_H along bond: {F_H_along_bond:.4f} kcal/(mol·Å)")
+                        print(f"    (+) means pushing H AWAY from O (repulsive)")
+                        print(f"    (-) means pushing H TOWARD O (attractive)")
+                        
+                        if d_OH < 0.96 and F_H_along_bond < 0:
+                            print(f"  *** BUG: Bond compressed but force is ATTRACTIVE! Should be repulsive! ***")
+                        elif d_OH > 0.96 and F_H_along_bond > 0:
+                            print(f"  *** BUG: Bond stretched but force is REPULSIVE! Should be attractive! ***")
                 
                 # Mass array for vectorized ops: a = F * conversion / m
                 # F is in kcal/(mol·Å), convert to amu·Å/fs² then divide by mass
