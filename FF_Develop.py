@@ -6982,11 +6982,42 @@ class Interactions():
         self.data['descriptor_info'] = all_descriptor_info 
         return  
     
+    def get_potential_types(self):
+        """Get the types used in the potential from setup.
+        
+        Returns
+        -------
+        dict
+            Dictionary mapping feature (intertype) to set of types used in potential.
+            E.g., {'vdw': {('Ag', 'Ag'), ('O', 'O')}, 'angles': {('H', 'O', 'H')}, ...}
+        """
+        potential_types = {}
+        
+        # Try opt_models first, then init_models
+        try:
+            models = getattr(self.setup, 'opt_models')
+        except AttributeError:
+            try:
+                models = getattr(self.setup, 'init_models')
+            except AttributeError:
+                return None  # No models defined, compute all
+        
+        for name, model in models.items():
+            feature = model.feature
+            ty = model.type
+            if feature not in potential_types:
+                potential_types[feature] = set()
+            potential_types[feature].add(ty)
+        
+        return potential_types
+    
     def calc_descriptor_info(self):
         """Compute full descriptor info including values and gradients for all configurations.
         
         If the data contains a 'lattice' column with (3,3) lattice vectors,
         minimum image convention is applied for periodic boundary conditions.
+        
+        Only computes descriptors for types that exist in the potential models.
         """
         
         n = len(self.data)
@@ -6995,6 +7026,9 @@ class Interactions():
         
         atom_confs = np.array(self.data['coords'])
         interactions = np.array(self.data['interactions'])
+        
+        # Get types used in potential to skip unnecessary calculations
+        potential_types = self.get_potential_types()
         
         # Check if lattice column exists
         has_lattice_column = 'lattice' in self.data.columns
@@ -7021,6 +7055,12 @@ class Interactions():
                 
                 for t,pairs in vals.items():
                     
+                    # Skip types not in potential models
+                    if potential_types is not None:
+                        if intertype not in potential_types:
+                            continue
+                        if t not in potential_types[intertype]:
+                            continue
                    
                     if intertype in ['connectivity','vdw']:
                         
