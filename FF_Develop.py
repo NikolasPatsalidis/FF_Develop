@@ -3266,6 +3266,65 @@ class VectorGeometry:
         d = np.sqrt(np.dot(r,r))
         return r/d
     
+    # =========== VECTORIZED VERSIONS ===========
+    
+    @staticmethod
+    def apply_mic_batch(diff, lattice, inv_lattice):
+        """Apply MIC to batch of displacement vectors.
+        
+        Parameters
+        ----------
+        diff : numpy.ndarray
+            (N, 3) array of displacement vectors.
+        lattice : numpy.ndarray
+            (3, 3) lattice vectors.
+        inv_lattice : numpy.ndarray
+            (3, 3) inverse lattice.
+            
+        Returns
+        -------
+        numpy.ndarray
+            (N, 3) MIC-corrected displacement vectors.
+        """
+        # Convert to fractional coordinates: s = diff @ inv_lattice
+        s = np.dot(diff, inv_lattice)
+        # Wrap to [-0.5, 0.5)
+        s = s - np.floor(s + 0.5)
+        # Convert back to Cartesian
+        return np.dot(s, lattice)
+    
+    @staticmethod
+    def calc_bonds_batch(coords, i_indices, j_indices, lattice=None, inv_lattice=None):
+        """Compute distances and unit vectors for batch of pairs.
+        
+        Parameters
+        ----------
+        coords : numpy.ndarray
+            (natoms, 3) coordinate array.
+        i_indices, j_indices : numpy.ndarray
+            (N,) arrays of atom indices for pairs.
+        lattice, inv_lattice : numpy.ndarray or None
+            Lattice matrices for MIC, or None for non-periodic.
+            
+        Returns
+        -------
+        r : numpy.ndarray
+            (N,) distances.
+        partial_ri : numpy.ndarray
+            (N, 3) unit vectors from j to i.
+        """
+        ri = coords[i_indices]  # (N, 3)
+        rj = coords[j_indices]  # (N, 3)
+        diff = ri - rj  # (N, 3)
+        
+        if lattice is not None:
+            diff = VectorGeometry.apply_mic_batch(diff, lattice, inv_lattice)
+        
+        r = np.linalg.norm(diff, axis=1)  # (N,)
+        partial_ri = diff / r[:, np.newaxis]  # (N, 3)
+        
+        return r, partial_ri
+    
     @jit(nopython=True,fastmath=True)
     def calc_angle_pa_pc(ri,rj,rk):
         """Compute angle i-j-k and partial derivatives w.r.t. positions i and k."""
@@ -6504,11 +6563,10 @@ class Interactions():
 
         self.data['neibs'] = all_neibs       
         return
-    
-    
-    def calc_descriptor_info(self):
+
+    def calc_descriptor_info_serial(self):
         """Compute full descriptor info including values and gradients for all configurations.
-        
+        Calculated in a serial manner.
         If the data contains a 'lattice' column with (3,3) lattice vectors,
         minimum image convention is applied for periodic boundary conditions.
         """
@@ -6570,6 +6628,197 @@ class Interactions():
                             else:
                                 r[ip] = VectorGeometry.calc_dist(r1, r2)
                                 partial_ri[ip] = VectorGeometry.calc_unitvec(r1, r2)
+                       
+                        temp = {'values':r, 'partial_ri':partial_ri,
+                                'i_index':i_index,'j_index':j_index}
+                        
+                    elif intertype=='angles':
+                        npairs = len(pairs) 
+                        
+                        angles  = np.empty(npairs, dtype=float)
+                        pa = np.empty( (npairs,3), dtype=float)
+                        pc = np.empty( (npairs,3), dtype=float)
+                        i_index = np.empty(npairs,dtype=int)
+                        j_index = np.empty(npairs,dtype=int)
+                        k_index = np.empty(npairs,dtype=int)
+                        
+                        for ip,p in enumerate(pairs):
+                            i, j, k = p
+                        
+                            r1 = np.array(ac[i]) ; 
+                            r2 = np.array(ac[j]) ; 
+                            r3 = np.array(ac[k])
+                            
+                            i_index[ip] = i
+                            j_index[ip] = j
+                            k_index[ip] = k
+                            
+                            if use_mic:
+                                pa[ip], pc[ip] = VectorGeometry.calc_angle_pa_pc_mic(r1, r2, r3, lattice, inv_lattice)
+                                angles[ip] = VectorGeometry.calc_angle_mic(r1, r2, r3, lattice, inv_lattice)
+                            else:
+                                pa[ip], pc[ip] = VectorGeometry.calc_angle_pa_pc(r1, r2, r3)
+                                angles[ip] = VectorGeometry.calc_angle(r1, r2, r3)
+                        
+                        temp = {'values':angles, 'pa':pa, 'pc': pc,
+                                'i_index':i_index, 'j_index':j_index,
+                                'k_index': k_index}
+                    
+                    elif intertype =='dihedrals':
+                        
+                        npairs = len(pairs) 
+                        
+                        dihedrals  = np.empty(npairs, dtype=float)
+                        dri = np.empty( (npairs,3), dtype=float)
+                        drj = np.empty( (npairs,3), dtype=float)
+                        drk = np.empty( (npairs,3), dtype=float)
+                        drl = np.empty( (npairs,3), dtype=float)
+                        
+                        i_index = np.empty(npairs,dtype=int)
+                        j_index = np.empty(npairs,dtype=int)
+                        k_index = np.empty(npairs,dtype=int)
+                        l_index = np.empty(npairs,dtype=int)
+                        
+                        for ip,p in enumerate(pairs):
+                            i, j, k, l = p
+                            r1 = np.array(ac[i]) ; 
+                            r2 = np.array(ac[j]) ; 
+                            r3 = np.array(ac[k])
+                            r4 = np.array(ac[l])
+                            
+                            i_index[ip] = i
+                            j_index[ip] = j
+                            k_index[ip] = k
+                            l_index[ip] = l
+                            
+                            if use_mic:
+                                # For MIC, we need to use the MIC-corrected dihedral
+                                # Gradient calculation with MIC requires special handling
+                                grad = VectorGeometry.calc_dihedral_grad_mic(r1, r2, r3, r4, lattice, inv_lattice)
+                                dihedrals[ip] = VectorGeometry.calc_dihedral_mic(r1, r2, r3, r4, lattice, inv_lattice)
+                            else:
+                                grad = VectorGeometry.calc_dihedral_grad(r1, r2, r3, r4)
+                                dihedrals[ip] = VectorGeometry.calc_dihedral(r1, r2, r3, r4)
+                            
+                            dri[ip] = grad[0] 
+                            drj[ip] = grad[1]
+                            drk[ip] = grad[2]
+                            drl[ip] = grad[3]
+                            
+                        temp = {'values':dihedrals, 'dri':dri, 'drj': drj,
+                                'drk':drk,'drl':drl,
+                                'i_index':i_index, 'j_index':j_index,
+                                'k_index': k_index, 'l_index': l_index}
+                        
+                    elif intertype=='rhos':
+                        r0 = self.rho_r0
+                        rc = self.rho_rc
+                        
+                        n_rhos = len(pairs) 
+                        
+                        rhos  = np.empty(n_rhos, dtype=float)
+                        
+                        npairs = np.sum([len(v) for v in pairs])
+                        
+                        v_ij = np.empty( (npairs,3), dtype=float)
+                        
+                        i_index = np.empty(npairs,dtype=int)
+                        j_index = np.empty(npairs,dtype=int)
+                        to_pair_index = np.empty(npairs,dtype=int)
+                        
+                        c = self.compute_coeff(r0, rc)
+                        
+                        tot_iter = 0
+                        for iv in range(n_rhos):
+                            rho = 0
+                            for ip,p in enumerate(pairs[iv]):
+                                i,j  = p 
+                                r1 = np.array(ac[i]) 
+                                r2 = np.array(ac[j])
+                                
+                                i_index[tot_iter] = i
+                                j_index[tot_iter] = j
+                                to_pair_index[tot_iter] = iv
+                                
+                                if use_mic:
+                                    r12 = VectorGeometry.calc_dist_mic(r1, r2, lattice, inv_lattice)
+                                    dirvec = self.dphi_rho(r12, c, r0, rc) * VectorGeometry.calc_unitvec_mic(r1, r2, lattice, inv_lattice)
+                                else:
+                                    r12 = VectorGeometry.calc_dist(r1, r2)
+                                    dirvec = self.dphi_rho(r12, c, r0, rc) * VectorGeometry.calc_unitvec(r1, r2)
+                                v_ij[tot_iter] = dirvec
+                                
+                                rho += self.phi_rho(r12,c,r0,rc)
+
+                                tot_iter+=1
+                                
+                            rhos[iv] = rho
+                        temp = {'values':rhos,'n_central':n_rhos , 
+                                'v_ij':v_ij,'to_pair_index':to_pair_index,
+                                'i_index':i_index,'j_index':j_index}
+                    else:
+                        raise Exception(NotImplemented)
+                    
+                    d[t] = temp.copy()
+                           
+                descriptor_info[intertype] = d.copy()
+    
+            all_descriptor_info[m] = descriptor_info
+        self.data['descriptor_info'] = all_descriptor_info 
+        return  
+    
+    def calc_descriptor_info(self):
+        """Compute full descriptor info including values and gradients for all configurations.
+        
+        If the data contains a 'lattice' column with (3,3) lattice vectors,
+        minimum image convention is applied for periodic boundary conditions.
+        """
+        
+        n = len(self.data)
+        
+        all_descriptor_info = np.empty(n ,dtype=object)
+        
+        atom_confs = np.array(self.data['coords'])
+        interactions = np.array(self.data['interactions'])
+        
+        # Check if lattice column exists
+        has_lattice_column = 'lattice' in self.data.columns
+        if has_lattice_column:
+            lattices = np.array(self.data['lattice'])
+        
+        for m, ac, inters in zip(range(n), atom_confs, interactions):
+            
+            descriptor_info = dict(keys=inters.keys())
+            
+            # Check per-datapoint if lattice is not None
+            use_mic = False
+            if has_lattice_column and lattices[m] is not None:
+                lattice = np.array(lattices[m], dtype=np.float64)
+                inv_lattice = np.linalg.inv(lattice)
+                use_mic = True
+            else:
+                lattice = None
+                inv_lattice = None
+            
+            for intertype,vals in inters.items():
+                
+                d =  {t : None for t in vals.keys()}
+                
+                for t,pairs in vals.items():
+                    
+                   
+                    if intertype in ['connectivity','vdw']:
+                        
+                        # Vectorized bond calculation
+                        pairs_arr = np.array(pairs, dtype=int)
+                        i_index = pairs_arr[:, 0]
+                        j_index = pairs_arr[:, 1]
+                        
+                        r, partial_ri = VectorGeometry.calc_bonds_batch(
+                            ac, i_index, j_index, 
+                            lattice if use_mic else None,
+                            inv_lattice if use_mic else None
+                        )
                        
                         temp = {'values':r, 'partial_ri':partial_ri,
                                 'i_index':i_index,'j_index':j_index}
