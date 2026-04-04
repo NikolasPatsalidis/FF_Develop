@@ -1689,13 +1689,13 @@ class LangevinDynamics:
                     print(f"  Reached max_candidates={max_candidates} at step {step+1}. Breaking early.")
                     break
                     
-            if (step + 1) % 10 == 0:
+            if (step + 1) % 100 == 0:
                 # Get max velocity and force for monitoring
                 max_vel = max(np.abs(velocities[idx]).max() for idx in data.index)
                 max_force = max(np.abs(forces[idx]).max() for idx in data.index)
                 v_thermal = np.sqrt(self.KB_KCAL * self.temperature * self.KCAL_TO_AMU_A2_FS2 / 1.008)
                 print(f"  Step {step + 1}/{n_steps} | v_max={max_vel:.4f} Å/fs (v_th (H) ~{v_thermal:.4f}) | F_max={max_force:.2f} kcal/mol/Å | configs={len(sampled_configs)}")
-        
+                sys.stdout.flush()
         # Close trajectory files
         for fh in traj_files.values():
             fh.close()
