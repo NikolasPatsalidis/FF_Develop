@@ -6784,6 +6784,8 @@ class Interactions():
         Calculated in a serial manner.
         If the data contains a 'lattice' column with (3,3) lattice vectors,
         minimum image convention is applied for periodic boundary conditions.
+        
+        Only computes descriptors for types that exist in the potential models.
         """
         
         n = len(self.data)
@@ -6792,6 +6794,9 @@ class Interactions():
         
         atom_confs = np.array(self.data['coords'])
         interactions = np.array(self.data['interactions'])
+        
+        # Get types used in potential to skip unnecessary calculations
+        potential_types = self.get_potential_types()
         
         # Check if lattice column exists
         has_lattice_column = 'lattice' in self.data.columns
@@ -6817,7 +6822,13 @@ class Interactions():
                 d =  {t : None for t in vals.keys()}
                 
                 for t,pairs in vals.items():
-                    
+                    print ('Serial: ', t, potential_types[intertype])
+                    # Skip types not in potential models
+                    if potential_types is not None:
+                        if intertype not in potential_types:
+                            continue
+                        if t not in potential_types[intertype]:
+                            continue
                    
                     if intertype in ['connectivity','vdw']:
                         
