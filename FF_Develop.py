@@ -3390,6 +3390,144 @@ class VectorGeometry:
         
         return angles, pa, pc
     
+    @staticmethod
+    def calc_dihedrals_batch(coords, i_indices, j_indices, k_indices, l_indices, lattice=None, inv_lattice=None):
+        """Compute dihedral angles and gradients for batch of quadruplets.
+        
+        Parameters
+        ----------
+        coords : numpy.ndarray or list
+            (natoms, 3) coordinate array.
+        i_indices, j_indices, k_indices, l_indices : numpy.ndarray
+            (N,) arrays of atom indices for dihedral i-j-k-l.
+        lattice, inv_lattice : numpy.ndarray or None
+            Lattice matrices for MIC, or None for non-periodic.
+            
+        Returns
+        -------
+        dihedrals : numpy.ndarray
+            (N,) dihedral angle values in radians.
+        dri, drj, drk, drl : numpy.ndarray
+            (N, 3) gradients w.r.t. each atom position.
+        """
+        coords = np.asarray(coords, dtype=float)
+        ri = coords[i_indices]  # (N, 3)
+        rj = coords[j_indices]  # (N, 3)
+        rk = coords[k_indices]  # (N, 3)
+        rl = coords[l_indices]  # (N, 3)
+        
+        # Bond vectors
+        b1 = rj - ri  # (N, 3)
+        b2 = rk - rj  # (N, 3)
+        b3 = rl - rk  # (N, 3)
+        
+        if lattice is not None:
+            b1 = VectorGeometry.apply_mic_batch(b1, lattice, inv_lattice)
+            b2 = VectorGeometry.apply_mic_batch(b2, lattice, inv_lattice)
+            b3 = VectorGeometry.apply_mic_batch(b3, lattice, inv_lattice)
+        
+        # Normal vectors to planes
+        n1 = np.cross(b1, b2)  # (N, 3)
+        n2 = np.cross(b2, b3)  # (N, 3)
+        
+        # Normalized b2
+        b2_norm = np.linalg.norm(b2, axis=1, keepdims=True)
+        nb2 = b2 / np.maximum(b2_norm, 1e-10)  # (N, 3)
+        
+        # m1 = n1 x nb2
+        m1 = np.cross(n1, nb2)  # (N, 3)
+        
+        # x = n1 . n2, y = m1 . n2
+        x = np.sum(n1 * n2, axis=1)  # (N,)
+        y = np.sum(m1 * n2, axis=1)  # (N,)
+        
+        # Dihedral angle
+        dihedrals = np.arctan2(y, x)  # (N,)
+        
+        # Gradients - computed per dihedral (vectorization of gradient is complex)
+        N = len(i_indices)
+        dri = np.empty((N, 3), dtype=float)
+        drj = np.empty((N, 3), dtype=float)
+        drk = np.empty((N, 3), dtype=float)
+        drl = np.empty((N, 3), dtype=float)
+        
+        for ip in range(N):
+            grad = VectorGeometry._calc_dihedral_grad_from_bonds(
+                b1[ip], b2[ip], b3[ip], n1[ip], n2[ip], nb2[ip], m1[ip], x[ip], y[ip]
+            )
+            dri[ip] = grad[0]
+            drj[ip] = grad[1]
+            drk[ip] = grad[2]
+            drl[ip] = grad[3]
+        
+        return dihedrals, dri, drj, drk, drl
+    
+    @staticmethod
+    def _calc_dihedral_grad_from_bonds(b1, b2, b3, n1, n2, nb2, m1, x, y):
+        """Compute dihedral gradient from precomputed bond vectors."""
+        grad = np.zeros((4, 3), dtype=np.float64)
+        
+        denom = x**2 + y**2
+        if denom < 1e-20:
+            return grad
+            
+        dwdx = -y / denom
+        dwdy = x / denom
+        
+        # dwdri calculation
+        dxdn1 = n2
+        dydm1 = n2
+        
+        dm1dn1 = VectorGeometry.derivative_cross_product_wrt_first(n1, nb2)
+        dn1db1 = VectorGeometry.derivative_cross_product_wrt_first(b1, b2)
+        dwdm1 = dwdy * dydm1.T
+        db1dri = -1
+        dwdn1 = dwdx * dxdn1.T + np.dot(dwdm1, dm1dn1).T
+        
+        dwdb1 = np.dot(dwdn1, dn1db1)
+        grad[0] = dwdb1 * db1dri
+        
+        # dwdrj calculation
+        db1drj = 1
+        db2drj = -1
+        
+        T1 = dwdb1 * db1drj
+        
+        dn1db2 = VectorGeometry.derivative_cross_product_wrt_second(b1, b2)
+        T21 = np.dot(dwdn1, dn1db2)
+        
+        dn2db2 = VectorGeometry.derivative_cross_product_wrt_first(b2, b3)
+        dxdn2 = n1
+        dydn2 = m1
+        dwdn2 = (dwdx * dxdn2 + dwdy * dydn2).T
+        T22 = np.dot(dwdn2, dn2db2)
+        
+        dnb2db2 = VectorGeometry.derivative_normalized_vector(b2)
+        dm1dnb2 = VectorGeometry.derivative_cross_product_wrt_second(n1, nb2)
+        
+        dwdnb2 = np.dot(dwdm1, dm1dnb2).T
+        T23 = np.dot(dwdnb2, dnb2db2)
+        
+        dwdb2 = T21 + T22 + T23
+        
+        grad[1] = T1 + dwdb2 * db2drj
+        
+        # dwdrk calculation
+        db2drk = 1
+        db3drk = -1
+        
+        dwdb3 = VectorGeometry.derivative_cross_product_wrt_second(b2, b3)
+        dwdb3 = np.dot(dwdn2, dwdb3)
+        A1 = dwdb2 * db2drk
+        A2 = dwdb3 * db3drk
+        grad[2] = A1 + A2
+        
+        # dwdrl calculation
+        db3drl = 1
+        grad[3] = dwdb3 * db3drl
+        
+        return grad
+    
     @jit(nopython=True,fastmath=True)
     def calc_angle_pa_pc(ri,rj,rk):
         """Compute angle i-j-k and partial derivatives w.r.t. positions i and k."""
@@ -6908,44 +7046,18 @@ class Interactions():
                     
                     elif intertype =='dihedrals':
                         
-                        npairs = len(pairs) 
+                        # Vectorized dihedral calculation
+                        pairs_arr = np.array(pairs, dtype=int)
+                        i_index = pairs_arr[:, 0]
+                        j_index = pairs_arr[:, 1]
+                        k_index = pairs_arr[:, 2]
+                        l_index = pairs_arr[:, 3]
                         
-                        dihedrals  = np.empty(npairs, dtype=float)
-                        dri = np.empty( (npairs,3), dtype=float)
-                        drj = np.empty( (npairs,3), dtype=float)
-                        drk = np.empty( (npairs,3), dtype=float)
-                        drl = np.empty( (npairs,3), dtype=float)
-                        
-                        i_index = np.empty(npairs,dtype=int)
-                        j_index = np.empty(npairs,dtype=int)
-                        k_index = np.empty(npairs,dtype=int)
-                        l_index = np.empty(npairs,dtype=int)
-                        
-                        for ip,p in enumerate(pairs):
-                            i, j, k, l = p
-                            r1 = np.array(ac[i]) ; 
-                            r2 = np.array(ac[j]) ; 
-                            r3 = np.array(ac[k])
-                            r4 = np.array(ac[l])
-                            
-                            i_index[ip] = i
-                            j_index[ip] = j
-                            k_index[ip] = k
-                            l_index[ip] = l
-                            
-                            if use_mic:
-                                # For MIC, we need to use the MIC-corrected dihedral
-                                # Gradient calculation with MIC requires special handling
-                                grad = VectorGeometry.calc_dihedral_grad_mic(r1, r2, r3, r4, lattice, inv_lattice)
-                                dihedrals[ip] = VectorGeometry.calc_dihedral_mic(r1, r2, r3, r4, lattice, inv_lattice)
-                            else:
-                                grad = VectorGeometry.calc_dihedral_grad(r1, r2, r3, r4)
-                                dihedrals[ip] = VectorGeometry.calc_dihedral(r1, r2, r3, r4)
-                            
-                            dri[ip] = grad[0] 
-                            drj[ip] = grad[1]
-                            drk[ip] = grad[2]
-                            drl[ip] = grad[3]
+                        dihedrals, dri, drj, drk, drl = VectorGeometry.calc_dihedrals_batch(
+                            ac, i_index, j_index, k_index, l_index,
+                            lattice if use_mic else None,
+                            inv_lattice if use_mic else None
+                        )
                             
                         temp = {'values':dihedrals, 'dri':dri, 'drj': drj,
                                 'drk':drk,'drl':drl,
