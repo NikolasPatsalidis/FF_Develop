@@ -134,7 +134,7 @@ class ActiveLearningConfig(ConfigBase):
         'max_scf_correction': 0.5,            # kcal/mol/Å - maximum allowed SCF correction
         'forbidden_separation': 6.0,          # Å - cutoff for detecting disconnected clusters
         'max_ener' : 50,                      # maximum energy to keep the data in kcal/mol
-        'max_force': 40.0,                    # maximum force magnitude to keep data in kcal/mol/Å
+        'max_force': 70.0,                    # maximum force magnitude to keep data in kcal/mol/Å
         # Langevin MD sampling parameters
         'md_initial_configs': 10,             # number of initial configs to start MD from
         'md_friction': 0.01,                  # friction coefficient (1/fs)
@@ -1527,7 +1527,9 @@ class LangevinDynamics:
         sample_interval = max(1, int(self.sampling_time / self.dt))
         
         print(f"Running Langevin dynamics: {n_steps} steps, dt={self.dt} fs, T={self.temperature} K")
+        print(f'{"-"*20}')
         print(f"Sampling every {sample_interval} steps ({self.sampling_time} fs)")
+        print(f'{"-"*60}')
         
         # Reference to optimizer's data (same object, updated in place)
         data = self.optimizer.data
@@ -1552,6 +1554,7 @@ class LangevinDynamics:
         mobile_atom_indices = np.where(mobile_masks[first_idx])[0].tolist()
         
         print(f"Validating analytical vs numerical forces on {len(mobile_atom_indices)} mobile atoms... mobile indices = {mobile_atom_indices}")
+        print(f'{"-"*20}')
         _, max_diff = self.optimizer.test_ForceClass(which='opt', epsilon=1e-4, verbose=True, 
                                                       random_tries=3, order=4,
                                                       mobile_atoms=mobile_atom_indices)
@@ -1560,6 +1563,7 @@ class LangevinDynamics:
             raise RuntimeError(f"Force validation FAILED! max_diff={max_diff:.4e} > tol={force_tol:.4e}. "
                              f"Analytical forces do not match numerical gradients of U.")
         
+        print(f'{"-"*60}')
         # Write initial frame (step 0) if saving trajectories
         if save_traj != 'no':
             energies = self._compute_energies()
@@ -1691,7 +1695,7 @@ class LangevinDynamics:
                     print(f"  Reached max_candidates={max_candidates} at step {step+1}. Breaking early.")
                     break
                     
-            if (step + 1) % 100 == 0:
+            if (step + 1) % min(100, sampled_interval) == 0:
                 # Get max velocity and force for monitoring
                 max_vel = max(np.abs(velocities[idx]).max() for idx in data.index)
                 max_force = max(np.abs(forces[idx]).max() for idx in data.index)
