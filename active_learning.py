@@ -133,7 +133,8 @@ class ActiveLearningConfig(ConfigBase):
         'max_gradient_error': 1000.0,         # kcal/mol/Å - sanity check for extremely repulsive configs  
         'max_scf_correction': 0.5,            # kcal/mol/Å - maximum allowed SCF correction
         'forbidden_separation': 6.0,          # Å - cutoff for detecting disconnected clusters
-        'max_ener' : 50,                      # maximum energy to keep the data in kcal/mol   
+        'max_ener' : 50,                      # maximum energy to keep the data in kcal/mol
+        'max_force': 70.0,                    # maximum force magnitude to keep data in kcal/mol/Å
         # Langevin MD sampling parameters
         'md_initial_configs': 10,             # number of initial configs to start MD from
         'md_friction': 0.01,                  # friction coefficient (1/fs)
@@ -141,6 +142,7 @@ class ActiveLearningConfig(ConfigBase):
         'md_integration_time': 1000.0,        # total integration time in fs
         'md_sampling_time': 10.0,             # store configurations every this many fs
         'md_save_traj': 'no',                 # 'no', 'sampled', 'full' - save trajectory to xyz
+        'md_max_candidates': None,            # max candidates to sample; if None, run full integration_time
     }
     
     def __init__(self):
@@ -563,6 +565,17 @@ class ActiveLearningPipeline:
         n_ener_filt = len(data)
         print(f'After energy maximum threshold filtering: {n_after_qe} -> {n_ener_filt} configs')
         
+        # Filter by maximum force magnitude
+        if 'Forces' in data.columns and self.al_config.max_force is not None:
+            max_force_per_config = data['Forces'].apply(lambda f: np.max(np.abs(f)) if f is not None else 0.0)
+            max_f_val = max_force_per_config.max()
+            filt_force = max_force_per_config <= self.al_config.max_force
+            data = data[filt_force]
+            n_force_filt = len(data)
+            print(f'After max force filtering ({self.al_config.max_force} kcal/mol/Å): {n_ener_filt} -> {n_force_filt} configs  |  max = {max_f_val:.1f}')
+        else:
+            n_force_filt = n_ener_filt
+        
         # Step 2: Clean well-separated structures (disconnected clusters)
         data = self.al.clean_well_separated_nanostructures(data, self.al_config.forbidden_separation)
         
@@ -702,9 +715,11 @@ class ActiveLearningPipeline:
         
         # Run Langevin dynamics with trajectory saving option
         save_traj = self.al_config.md_save_traj
+        max_candidates = self.al_config.md_max_candidates
         sampled_df = langevin.integrate(
             init_data, n_configs=n_init, iteration=iteration,
-            save_traj=save_traj, output_dir=self.setup.runpath
+            save_traj=save_traj, output_dir=self.setup.runpath,
+            max_candidates=max_candidates
         )
         
         # Convert to format expected by rest of pipeline
@@ -1220,8 +1235,6 @@ runpath_attributes : run
 
 max_ener        = 1.0
 force_importance = 1.0
-max_force       = 0.003
-clean_perc      = 0.8
 bC              = 50.0
 bS              = 20.0
 
@@ -1444,7 +1457,7 @@ class LangevinDynamics:
         for at, xyz in zip(at_types, coords):
             fh.write(f"{at} {xyz[0]:.6f} {xyz[1]:.6f} {xyz[2]:.6f}\n")
     
-    def integrate(self, init_data, n_configs=None, iteration=0, save_traj='no', output_dir='.'):
+    def integrate(self, init_data, n_configs=None, iteration=0, save_traj='no', output_dir='.', max_candidates=None):
         """Run Langevin dynamics and sample configurations.
         
         Parameters
@@ -1461,6 +1474,9 @@ class LangevinDynamics:
             'full' - save all frames
         output_dir : str, optional
             Directory to save trajectory files.
+        max_candidates : int, optional
+            Maximum number of candidates to sample. If reached, break early.
+            If None, run full integration_time.
             
         Returns
         -------
@@ -1511,7 +1527,9 @@ class LangevinDynamics:
         sample_interval = max(1, int(self.sampling_time / self.dt))
         
         print(f"Running Langevin dynamics: {n_steps} steps, dt={self.dt} fs, T={self.temperature} K")
+        print(f'{"-"*20}')
         print(f"Sampling every {sample_interval} steps ({self.sampling_time} fs)")
+        print(f'{"-"*60}')
         
         # Reference to optimizer's data (same object, updated in place)
         data = self.optimizer.data
@@ -1536,6 +1554,7 @@ class LangevinDynamics:
         mobile_atom_indices = np.where(mobile_masks[first_idx])[0].tolist()
         
         print(f"Validating analytical vs numerical forces on {len(mobile_atom_indices)} mobile atoms... mobile indices = {mobile_atom_indices}")
+        print(f'{"-"*20}')
         _, max_diff = self.optimizer.test_ForceClass(which='opt', epsilon=1e-4, verbose=True, 
                                                       random_tries=3, order=4,
                                                       mobile_atoms=mobile_atom_indices)
@@ -1544,6 +1563,7 @@ class LangevinDynamics:
             raise RuntimeError(f"Force validation FAILED! max_diff={max_diff:.4e} > tol={force_tol:.4e}. "
                              f"Analytical forces do not match numerical gradients of U.")
         
+        print(f'{"-"*60}')
         # Write initial frame (step 0) if saving trajectories
         if save_traj != 'no':
             energies = self._compute_energies()
@@ -1572,6 +1592,8 @@ class LangevinDynamics:
                 'Uclass': energies[idx],
             })
         
+        t_start = perf_counter()
+        last_log_step = 0
         for step in range(n_steps):
             # BAOAB integrator
             for idx in data.index:
@@ -1667,14 +1689,23 @@ class LangevinDynamics:
                     if save_traj == 'sampled':
                         comment = f"step={step+1} time_fs={(step+1)*self.dt:.2f} Uclass={energies[idx]:.4f}"
                         self._write_xyz_frame(traj_files[idx], coords, at_types, lattice, comment)
+                
+                # Check if max_candidates reached
+                if max_candidates is not None and len(sampled_configs) >= max_candidates:
+                    print(f"  Reached max_candidates={max_candidates} at step {step+1}. Breaking early.")
+                    break
                     
-            if (step + 1) % 10 == 0:
+            if (step + 1) % min(100, sample_interval) == 0:
                 # Get max velocity and force for monitoring
                 max_vel = max(np.abs(velocities[idx]).max() for idx in data.index)
                 max_force = max(np.abs(forces[idx]).max() for idx in data.index)
                 v_thermal = np.sqrt(self.KB_KCAL * self.temperature * self.KCAL_TO_AMU_A2_FS2 / 1.008)
-                print(f"  Step {step + 1}/{n_steps} | v_max={max_vel:.4f} Å/fs (v_th (H) ~{v_thermal:.4f}) | F_max={max_force:.2f} kcal/mol/Å | configs={len(sampled_configs)}")
-        
+                elapsed = perf_counter() - t_start
+                steps_since_last = (step + 1) - last_log_step
+                time_per_step = elapsed / (step + 1)
+                last_log_step = step + 1
+                print(f"  Step {step + 1}/{n_steps} | t={elapsed:.1f}s ({time_per_step*1000:.2f}ms/step) | v_max={max_vel:.4f} | F_max={max_force:.2f} | configs={len(sampled_configs)}")
+                sys.stdout.flush()
         # Close trajectory files
         for fh in traj_files.values():
             fh.close()
