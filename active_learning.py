@@ -1695,7 +1695,7 @@ class LangevinDynamics:
                     print(f"  Reached max_candidates={max_candidates} at step {step+1}. Breaking early.")
                     break
                     
-            if (step + 1) % min(100, sampled_interval) == 0:
+            if (step + 1) % min(100, sample_interval) == 0:
                 # Get max velocity and force for monitoring
                 max_vel = max(np.abs(velocities[idx]).max() for idx in data.index)
                 max_force = max(np.abs(forces[idx]).max() for idx in data.index)
