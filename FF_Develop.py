@@ -7004,8 +7004,16 @@ class Interactions():
         dict
             Dictionary mapping feature (intertype) to set of types used in potential.
             E.g., {'vdw': {('Ag', 'Ag'), ('O', 'O')}, 'angles': {('H', 'O', 'H')}, ...}
+            All intertypes are included, even if empty.
         """
-        potential_types = {}
+        # Initialize all intertypes with empty sets
+        potential_types = {
+            'connectivity': set(),
+            'vdw': set(),
+            'angles': set(),
+            'dihedrals': set(),
+            'rhos': set()
+        }
         
         # Try opt_models first, then init_models
         try:
@@ -7019,8 +7027,6 @@ class Interactions():
         for name, model in models.items():
             feature = model.feature
             ty = model.type
-            if feature not in potential_types:
-                potential_types[feature] = set()
             potential_types[feature].add(ty)
         
         return potential_types
