@@ -1780,6 +1780,11 @@ class al_help():
         GeneralFunctions.make_dir(setup.runpath)
         
         al_help.make_interactions(data,setup)
+        
+        # Test descriptor calculations if requested
+        if setup.test_descriptors:
+            inter = Interactions(data, setup)
+            inter.test_descriptor_calculations(tol=1e-6)
         dataMan = Data_Manager(data,setup)
         train_indexes, dev_indexes = dataMan.train_development_split()
         
@@ -5410,6 +5415,8 @@ class Setup_Interfacial_Optimization():
         'rho_r0' : 0.1,
         'rho_rc': 5.5,
         
+        'test_descriptors': False,
+        
         'distance_map':"dict()",
         'reference_energy':"dict()",
         'struct_types':"[('type1'),('type2','type3')]",
@@ -7120,6 +7127,84 @@ class Interactions():
             all_descriptor_info[m] = descriptor_info
         self.data['descriptor_info'] = all_descriptor_info 
         return
+    
+    def test_descriptor_calculations(self, tol=1e-6):
+        """Compare serial vs vectorized descriptor calculations.
+        
+        Parameters
+        ----------
+        tol : float
+            Tolerance for numerical differences. Default 1e-6.
+            
+        Returns
+        -------
+        bool
+            True if all tests pass, raises AssertionError otherwise.
+        """
+        import copy
+        
+        print("\n" + "="*60)
+        print("TESTING DESCRIPTOR CALCULATIONS: Serial vs Vectorized")
+        print("="*60)
+        
+        # Store original descriptor_info
+        original_descriptor_info = copy.deepcopy(self.data['descriptor_info'].values)
+        
+        # Compute with serial method
+        print("Computing descriptors with SERIAL method...")
+        self.calc_descriptor_info_serial()
+        serial_info = copy.deepcopy(self.data['descriptor_info'].values)
+        
+        # Compute with vectorized method
+        print("Computing descriptors with VECTORIZED method...")
+        self.calc_descriptor_info()
+        vectorized_info = self.data['descriptor_info'].values
+        
+        # Compare results
+        n_configs = len(serial_info)
+        all_passed = True
+        
+        for m in range(n_configs):
+            serial_desc = serial_info[m]
+            vec_desc = vectorized_info[m]
+            
+            for intertype in serial_desc.keys():
+                if intertype == 'keys':
+                    continue
+                    
+                serial_inter = serial_desc[intertype]
+                vec_inter = vec_desc[intertype]
+                
+                for t in serial_inter.keys():
+                    serial_data = serial_inter[t]
+                    vec_data = vec_inter[t]
+                    
+                    for key in serial_data.keys():
+                        s_val = np.array(serial_data[key])
+                        v_val = np.array(vec_data[key])
+                        
+                        if s_val.dtype in [np.float64, np.float32, float]:
+                            max_diff = np.max(np.abs(s_val - v_val))
+                            if max_diff > tol:
+                                print(f"FAILED: Config {m}, {intertype}, type {t}, key '{key}'")
+                                print(f"  Max difference: {max_diff:.2e} (tolerance: {tol:.2e})")
+                                all_passed = False
+                        else:
+                            # Integer indices - must match exactly
+                            if not np.array_equal(s_val, v_val):
+                                print(f"FAILED: Config {m}, {intertype}, type {t}, key '{key}'")
+                                print(f"  Index mismatch")
+                                all_passed = False
+        
+        if all_passed:
+            print("\n" + "-"*60)
+            print("ALL TESTS PASSED! Serial and vectorized results match.")
+            print(f"Tested {n_configs} configurations with tolerance {tol:.2e}")
+            print("-"*60 + "\n")
+        else:
+            raise AssertionError("Descriptor calculation test FAILED! See differences above.")
+        
+        return True
 
 class Data_Manager():
     """Utility class for managing molecular datasets.
