@@ -7222,6 +7222,8 @@ class Interactions():
                     continue
                 serial_desc[intertype] = {}
                 for t, data in vals.items():
+                    if data is None:  # Skip types not in potential
+                        continue
                     serial_desc[intertype][t] = {k: np.array(v).copy() for k, v in data.items()}
             serial_info.append(serial_desc)
         
