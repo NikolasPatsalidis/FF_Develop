@@ -1108,6 +1108,7 @@ class al_help():
                                         rho_r0=setup.rho_r0,rho_rc=setup.rho_rc)
         
         intersHandler.InteractionsForData(setup)
+
         intersHandler.calc_descriptor_info()
         return
     
@@ -1783,7 +1784,11 @@ class al_help():
         
         # Test descriptor calculations if requested
         if setup.test_descriptors:
-            inter = Interactions(data, setup)
+            inter = Interactions(data, setup,
+                                vdw_bond_dist=3,
+                                rho_r0=setup.rho_r0,rho_rc=setup.rho_rc)
+        
+            inter.InteractionsForData(setup)
             inter.test_descriptor_calculations(tol=1e-6)
         dataMan = Data_Manager(data,setup)
         train_indexes, dev_indexes = dataMan.train_development_split()
@@ -6149,9 +6154,9 @@ class Interactions():
     """
     
     def __init__(self,data,setup,atom_model = 'AA',
-            vdw_bond_dist=4, find_vdw_unconnected = True,
-            find_bonds=False, find_vdw_connected=True,
-            find_dihedrals=False,find_angles=True,find_densities=False,
+            vdw_bond_dist=3, find_vdw_unconnected = True,
+            find_bonds=True, find_vdw_connected=True,
+            find_dihedrals=True,find_angles=True,find_densities=True,
             excludedBondtypes=[],**kwargs):
         """Initialize interaction handler with configuration options."""
         self.setup = setup
@@ -6437,7 +6442,7 @@ class Interactions():
     @staticmethod
     def get_vdw(types,bond_d_matrix,find_vdw_connected,
                  find_vdw_unconnected,
-                 vdw_bond_dist=4):
+                 vdw_bond_dist=3):
         """Combine connected and unconnected van der Waals pairs."""
         if find_vdw_unconnected:
             vdw_unc = Interactions.get_vdw_unconnected(types,bond_d_matrix)
