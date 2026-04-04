@@ -6822,13 +6822,16 @@ class Interactions():
                 d =  {t : None for t in vals.keys()}
                 
                 for t,pairs in vals.items():
-                    print ('Serial: ', t, potential_types[intertype])
+                    print (f'Serial: {intertype} : -->', t, potential_types[intertype])
                     # Skip types not in potential models
                     if potential_types is not None:
                         if intertype not in potential_types:
+                            print(f'Skipping {t}')
                             continue
                         if t not in potential_types[intertype]:
+                            print(f'Skipping {t}')
                             continue
+
                    
                     if intertype in ['connectivity','vdw']:
                         
@@ -7239,6 +7242,8 @@ class Interactions():
                     serial_data = serial_inter[t]
                     vec_data = vec_inter[t]
                     
+                    print( f' Cheking {intertype}, type {t}, key {key}' )
+                    sys.stdout.flush()
                     for key in serial_data.keys():
                         s_val = np.array(serial_data[key])
                         v_val = np.array(vec_data[key])
