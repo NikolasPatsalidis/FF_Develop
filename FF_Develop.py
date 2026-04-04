@@ -3019,7 +3019,7 @@ class al_help():
         else:
             ix = data.index
         data = data.loc[ix] 
-        print('Kept {:4.3f} % of the {:s} data'.format(len(data)*100/n,prefix))
+        print('Sampling Temperature based cleaning - Kept {:d} out of {:d} of the {:s} data'.format(len(data), n, prefix))
         return data
 
 class logs():
