@@ -3326,6 +3326,70 @@ class VectorGeometry:
         
         return r, partial_ri
     
+    @staticmethod
+    def calc_angles_batch(coords, i_indices, j_indices, k_indices, lattice=None, inv_lattice=None):
+        """Compute angles and partial derivatives for batch of angle triples.
+        
+        Parameters
+        ----------
+        coords : numpy.ndarray or list
+            (natoms, 3) coordinate array.
+        i_indices, j_indices, k_indices : numpy.ndarray
+            (N,) arrays of atom indices for angle i-j-k (j is center).
+        lattice, inv_lattice : numpy.ndarray or None
+            Lattice matrices for MIC, or None for non-periodic.
+            
+        Returns
+        -------
+        angles : numpy.ndarray
+            (N,) angle values in radians.
+        pa : numpy.ndarray
+            (N, 3) partial derivatives w.r.t. position i.
+        pc : numpy.ndarray
+            (N, 3) partial derivatives w.r.t. position k.
+        """
+        coords = np.asarray(coords, dtype=float)
+        ri = coords[i_indices]  # (N, 3)
+        rj = coords[j_indices]  # (N, 3)
+        rk = coords[k_indices]  # (N, 3)
+        
+        # Bond vectors
+        vij = ri - rj  # (N, 3)
+        vkj = rk - rj  # (N, 3)
+        
+        if lattice is not None:
+            vij = VectorGeometry.apply_mic_batch(vij, lattice, inv_lattice)
+            vkj = VectorGeometry.apply_mic_batch(vkj, lattice, inv_lattice)
+        
+        # Dot products and norms
+        a = np.sum(vij * vkj, axis=1)  # (N,) dot product
+        b = np.linalg.norm(vij, axis=1)  # (N,) |vij|
+        c = np.linalg.norm(vkj, axis=1)  # (N,) |vkj|
+        
+        bc = b * c  # (N,)
+        
+        # Partial derivatives of cos(theta) w.r.t. ri and rk
+        # fi = vkj/(b*c) - a*vij/(c*b^3)
+        # fk = vij/(b*c) - a*vkj/(b*c^3)
+        fi = vkj / bc[:, np.newaxis] - a[:, np.newaxis] * vij / (c * b**3)[:, np.newaxis]
+        fk = vij / bc[:, np.newaxis] - a[:, np.newaxis] * vkj / (b * c**3)[:, np.newaxis]
+        
+        # cos(theta) and angle
+        cth = a / bc
+        cth = np.clip(cth, -1.0, 1.0)  # Numerical safety
+        angles = np.arccos(cth)
+        
+        # Chain rule: dtheta/dcth = -1/sin(theta)
+        sin_th = np.sin(angles)
+        sin_th = np.maximum(sin_th, 1.49e-8)  # Avoid division by zero
+        dth_dcth = -1.0 / sin_th
+        
+        # Apply chain rule
+        pa = fi * dth_dcth[:, np.newaxis]
+        pc = fk * dth_dcth[:, np.newaxis]
+        
+        return angles, pa, pc
+    
     @jit(nopython=True,fastmath=True)
     def calc_angle_pa_pc(ri,rj,rk):
         """Compute angle i-j-k and partial derivatives w.r.t. positions i and k."""
@@ -6825,32 +6889,18 @@ class Interactions():
                                 'i_index':i_index,'j_index':j_index}
                         
                     elif intertype=='angles':
-                        npairs = len(pairs) 
                         
-                        angles  = np.empty(npairs, dtype=float)
-                        pa = np.empty( (npairs,3), dtype=float)
-                        pc = np.empty( (npairs,3), dtype=float)
-                        i_index = np.empty(npairs,dtype=int)
-                        j_index = np.empty(npairs,dtype=int)
-                        k_index = np.empty(npairs,dtype=int)
+                        # Vectorized angle calculation
+                        pairs_arr = np.array(pairs, dtype=int)
+                        i_index = pairs_arr[:, 0]
+                        j_index = pairs_arr[:, 1]
+                        k_index = pairs_arr[:, 2]
                         
-                        for ip,p in enumerate(pairs):
-                            i, j, k = p
-                        
-                            r1 = np.array(ac[i]) ; 
-                            r2 = np.array(ac[j]) ; 
-                            r3 = np.array(ac[k])
-                            
-                            i_index[ip] = i
-                            j_index[ip] = j
-                            k_index[ip] = k
-                            
-                            if use_mic:
-                                pa[ip], pc[ip] = VectorGeometry.calc_angle_pa_pc_mic(r1, r2, r3, lattice, inv_lattice)
-                                angles[ip] = VectorGeometry.calc_angle_mic(r1, r2, r3, lattice, inv_lattice)
-                            else:
-                                pa[ip], pc[ip] = VectorGeometry.calc_angle_pa_pc(r1, r2, r3)
-                                angles[ip] = VectorGeometry.calc_angle(r1, r2, r3)
+                        angles, pa, pc = VectorGeometry.calc_angles_batch(
+                            ac, i_index, j_index, k_index,
+                            lattice if use_mic else None,
+                            inv_lattice if use_mic else None
+                        )
                         
                         temp = {'values':angles, 'pa':pa, 'pc': pc,
                                 'i_index':i_index, 'j_index':j_index,
