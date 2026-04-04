@@ -7141,19 +7141,24 @@ class Interactions():
         bool
             True if all tests pass, raises AssertionError otherwise.
         """
-        import copy
-        
         print("\n" + "="*60)
         print("TESTING DESCRIPTOR CALCULATIONS: Serial vs Vectorized")
         print("="*60)
         
-        # Store original descriptor_info
-        original_descriptor_info = copy.deepcopy(self.data['descriptor_info'].values)
-        
         # Compute with serial method
         print("Computing descriptors with SERIAL method...")
         self.calc_descriptor_info_serial()
-        serial_info = copy.deepcopy(self.data['descriptor_info'].values)
+        # Store serial results by extracting values (avoid deepcopy issues with dict_keys)
+        serial_info = []
+        for desc in self.data['descriptor_info'].values:
+            serial_desc = {}
+            for intertype, vals in desc.items():
+                if intertype == 'keys':
+                    continue
+                serial_desc[intertype] = {}
+                for t, data in vals.items():
+                    serial_desc[intertype][t] = {k: np.array(v).copy() for k, v in data.items()}
+            serial_info.append(serial_desc)
         
         # Compute with vectorized method
         print("Computing descriptors with VECTORIZED method...")
@@ -7169,9 +7174,6 @@ class Interactions():
             vec_desc = vectorized_info[m]
             
             for intertype in serial_desc.keys():
-                if intertype == 'keys':
-                    continue
-                    
                 serial_inter = serial_desc[intertype]
                 vec_inter = vec_desc[intertype]
                 
