@@ -6831,7 +6831,6 @@ class Interactions():
                         if t not in potential_types[intertype]:
                             print(f'Skipping {t}')
                             continue
-
                    
                     if intertype in ['connectivity','vdw']:
                         
@@ -7250,11 +7249,12 @@ class Interactions():
                     serial_data = serial_inter[t]
                     vec_data = vec_inter[t]
                     
-                    print( f' Cheking {intertype}, type {t}, key {key}' )
-                    sys.stdout.flush()
                     for key in serial_data.keys():
                         s_val = np.array(serial_data[key])
                         v_val = np.array(vec_data[key])
+                        
+                        print( f' Cheking {intertype}, type {t}, key {key}' )
+                        sys.stdout.flush()    
                         
                         if s_val.dtype in [np.float64, np.float32, float]:
                             diff = np.abs(s_val - v_val)
