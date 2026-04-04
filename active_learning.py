@@ -133,7 +133,8 @@ class ActiveLearningConfig(ConfigBase):
         'max_gradient_error': 1000.0,         # kcal/mol/Å - sanity check for extremely repulsive configs  
         'max_scf_correction': 0.5,            # kcal/mol/Å - maximum allowed SCF correction
         'forbidden_separation': 6.0,          # Å - cutoff for detecting disconnected clusters
-        'max_ener' : 50,                      # maximum energy to keep the data in kcal/mol   
+        'max_ener' : 50,                      # maximum energy to keep the data in kcal/mol
+        'max_force': 40.0,                    # maximum force magnitude to keep data in kcal/mol/Å
         # Langevin MD sampling parameters
         'md_initial_configs': 10,             # number of initial configs to start MD from
         'md_friction': 0.01,                  # friction coefficient (1/fs)
@@ -563,6 +564,17 @@ class ActiveLearningPipeline:
         data = data[ np.logical_not(filt_clean) ]
         n_ener_filt = len(data)
         print(f'After energy maximum threshold filtering: {n_after_qe} -> {n_ener_filt} configs')
+        
+        # Filter by maximum force magnitude
+        if 'Forces' in data.columns and self.al_config.max_force is not None:
+            max_force_per_config = data['Forces'].apply(lambda f: np.max(np.abs(f)) if f is not None else 0.0)
+            max_f_val = max_force_per_config.max()
+            filt_force = max_force_per_config <= self.al_config.max_force
+            data = data[filt_force]
+            n_force_filt = len(data)
+            print(f'After max force filtering ({self.al_config.max_force} kcal/mol/Å): {n_ener_filt} -> {n_force_filt} configs  |  max = {max_f_val:.1f}')
+        else:
+            n_force_filt = n_ener_filt
         
         # Step 2: Clean well-separated structures (disconnected clusters)
         data = self.al.clean_well_separated_nanostructures(data, self.al_config.forbidden_separation)
@@ -1223,8 +1235,6 @@ runpath_attributes : run
 
 max_ener        = 1.0
 force_importance = 1.0
-max_force       = 0.003
-clean_perc      = 0.8
 bC              = 50.0
 bS              = 20.0
 
