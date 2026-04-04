@@ -7168,6 +7168,8 @@ class Interactions():
         # Compare results
         n_configs = len(serial_info)
         all_passed = True
+        global_max_diff = 0.0
+        global_max_info = None
         
         for m in range(n_configs):
             serial_desc = serial_info[m]
@@ -7186,11 +7188,25 @@ class Interactions():
                         v_val = np.array(vec_data[key])
                         
                         if s_val.dtype in [np.float64, np.float32, float]:
-                            max_diff = np.max(np.abs(s_val - v_val))
+                            diff = np.abs(s_val - v_val)
+                            max_diff = np.max(diff)
                             if max_diff > tol:
                                 print(f"FAILED: Config {m}, {intertype}, type {t}, key '{key}'")
                                 print(f"  Max difference: {max_diff:.2e} (tolerance: {tol:.2e})")
                                 all_passed = False
+                            # Track global max difference
+                            if max_diff > global_max_diff:
+                                global_max_diff = max_diff
+                                max_idx = np.unravel_index(np.argmax(diff), diff.shape)
+                                global_max_info = {
+                                    'datapoint': m,
+                                    'intertype': intertype,
+                                    'pair_type': t,
+                                    'key': key,
+                                    'pair_index': max_idx[0] if len(max_idx) > 0 else 0,
+                                    'serial_val': s_val[max_idx] if s_val.ndim > 0 else s_val,
+                                    'vec_val': v_val[max_idx] if v_val.ndim > 0 else v_val
+                                }
                         else:
                             # Integer indices - must match exactly
                             if not np.array_equal(s_val, v_val):
@@ -7198,11 +7214,22 @@ class Interactions():
                                 print(f"  Index mismatch")
                                 all_passed = False
         
+        # Print global max difference info
+        print("\n" + "-"*60)
+        print(f"GLOBAL MAX DIFFERENCE: {global_max_diff:.2e}")
+        if global_max_info:
+            print(f"  Datapoint: {global_max_info['datapoint']}")
+            print(f"  Intertype: {global_max_info['intertype']}")
+            print(f"  Pair type: {global_max_info['pair_type']}")
+            print(f"  Key: {global_max_info['key']}")
+            print(f"  Pair index: {global_max_info['pair_index']}")
+            print(f"  Serial value: {global_max_info['serial_val']}")
+            print(f"  Vectorized value: {global_max_info['vec_val']}")
+        print("-"*60)
+        
         if all_passed:
-            print("\n" + "-"*60)
-            print("ALL TESTS PASSED! Serial and vectorized results match.")
-            print(f"Tested {n_configs} configurations with tolerance {tol:.2e}")
-            print("-"*60 + "\n")
+            print("\nALL TESTS PASSED! Serial and vectorized results match.")
+            print(f"Tested {n_configs} configurations with tolerance {tol:.2e}\n")
         else:
             raise AssertionError("Descriptor calculation test FAILED! See differences above.")
         
