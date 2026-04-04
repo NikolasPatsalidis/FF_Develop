@@ -3299,7 +3299,7 @@ class VectorGeometry:
         
         Parameters
         ----------
-        coords : numpy.ndarray
+        coords : numpy.ndarray or list
             (natoms, 3) coordinate array.
         i_indices, j_indices : numpy.ndarray
             (N,) arrays of atom indices for pairs.
@@ -3313,6 +3313,7 @@ class VectorGeometry:
         partial_ri : numpy.ndarray
             (N, 3) unit vectors from j to i.
         """
+        coords = np.asarray(coords, dtype=float)  # Handle list input
         ri = coords[i_indices]  # (N, 3)
         rj = coords[j_indices]  # (N, 3)
         diff = ri - rj  # (N, 3)
