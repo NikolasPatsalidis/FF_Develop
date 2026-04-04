@@ -1588,6 +1588,8 @@ class LangevinDynamics:
                 'Uclass': energies[idx],
             })
         
+        t_start = perf_counter()
+        last_log_step = 0
         for step in range(n_steps):
             # BAOAB integrator
             for idx in data.index:
@@ -1694,7 +1696,11 @@ class LangevinDynamics:
                 max_vel = max(np.abs(velocities[idx]).max() for idx in data.index)
                 max_force = max(np.abs(forces[idx]).max() for idx in data.index)
                 v_thermal = np.sqrt(self.KB_KCAL * self.temperature * self.KCAL_TO_AMU_A2_FS2 / 1.008)
-                print(f"  Step {step + 1}/{n_steps} | v_max={max_vel:.4f} Å/fs (v_th (H) ~{v_thermal:.4f}) | F_max={max_force:.2f} kcal/mol/Å | configs={len(sampled_configs)}")
+                elapsed = perf_counter() - t_start
+                steps_since_last = (step + 1) - last_log_step
+                time_per_step = elapsed / (step + 1)
+                last_log_step = step + 1
+                print(f"  Step {step + 1}/{n_steps} | t={elapsed:.1f}s ({time_per_step*1000:.2f}ms/step) | v_max={max_vel:.4f} | F_max={max_force:.2f} | configs={len(sampled_configs)}")
                 sys.stdout.flush()
         # Close trajectory files
         for fh in traj_files.values():
