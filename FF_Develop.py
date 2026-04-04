@@ -1112,6 +1112,31 @@ class al_help():
         return
     
     @staticmethod
+    def update_descriptor_info(data, setup):
+        """Recompute descriptor geometry for existing topology.
+        
+        This is a lightweight alternative to make_interactions() for use during MD,
+        where topology (bonds, angles, dihedrals) doesn't change but coordinates do.
+        Requires that 'interactions' column already exists from a prior make_interactions call.
+        
+        Parameters
+        ----------
+        data : pandas.DataFrame
+            Dataset with 'interactions' column already populated.
+        setup : Setup_Interfacial_Optimization
+            Configuration containing rho parameters.
+        """
+        intersHandler = Interactions(data, setup, atom_model=setup.representation,
+                                     find_vdw_connected=False,
+                                     find_vdw_unconnected=False,
+                                     find_angles=False,
+                                     find_dihedrals=False,
+                                     find_densities=False,
+                                     rho_r0=setup.rho_r0, rho_rc=setup.rho_rc)
+        intersHandler.calc_descriptor_info()
+        return
+    
+    @staticmethod
     def evaluate_potential(data, setup, which='init'):
         """Evaluate the current force-field model on a dataset without optimization.
 

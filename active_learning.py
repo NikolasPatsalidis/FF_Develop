@@ -1405,13 +1405,23 @@ class LangevinDynamics:
         # The force field handles MIC correctly in make_interactions.
         return coords
     
-    def _compute_forces(self, which='opt'):
-        """Compute forces for all configurations in data."""
+    def _compute_forces(self, which='opt', rebuild_topology=False):
+        """Compute forces for all configurations in data.
+        
+        Parameters
+        ----------
+        rebuild_topology : bool
+            If True, rebuild full topology (bonds, angles, etc.).
+            If False, only recompute geometry from existing topology.
+        """
         models = getattr(self.setup, which + '_models')
         params, bounds, fixed_params, isnot_fixed, reguls = self.optimizer.get_parameter_info(models)
         
-        # Rebuild interactions
-        ff.al_help.make_interactions(self.optimizer.data, self.setup)
+        # Update descriptor info (geometry) - skip topology rebuild if not needed
+        if rebuild_topology or 'interactions' not in self.optimizer.data.columns:
+            ff.al_help.make_interactions(self.optimizer.data, self.setup)
+        else:
+            ff.al_help.update_descriptor_info(self.optimizer.data, self.setup)
         
         natoms_per_point = self.optimizer.data['natoms'].to_numpy()
         models_list_info = self.optimizer.get_list_of_model_information(models, 'all')
@@ -1634,11 +1644,12 @@ class LangevinDynamics:
                 self.optimizer.data.at[idx, 'coords'] = coords
                 velocities[idx] = vel
             
-            # Clear old interactions before recomputing forces
+            # Clear old descriptor_info (geometry) before recomputing forces
+            # Keep 'interactions' (topology) - it doesn't change during MD
             if 'descriptor_info' in self.optimizer.data.columns:
-                self.optimizer.data.drop(columns=['descriptor_info', 'interactions'], inplace=True, errors='ignore')
+                self.optimizer.data.drop(columns=['descriptor_info'], inplace=True, errors='ignore')
             
-            # A: Compute new forces (after position update)
+            # A: Compute new forces (after position update) - topology already cached
             forces = self._compute_forces()
             
             # Final half kick (only mobile atoms)
