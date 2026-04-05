@@ -617,7 +617,7 @@ class al_help():
         
         max_mc_steps = al_config.max_mc_steps
         max_candidates_per_system = al_config.max_candidates_per_system
-        number_of_data_per_step = al_config.number_of_data_per_step   
+        mc_initial_configs = al_config.mc_initial_configs   
         asymptotic_steps = al_config.mc_asymptotic_steps
         fixed_types = al_config.fixed_types
         pta, ptwh, prwh = al_config.translate_atoms, al_config.translate_whole, al_config.rotate_whole
@@ -661,11 +661,11 @@ class al_help():
 
             all_indexes = np.array(step_data.index)
             try:
-                idx_chosen = np.random.choice(all_indexes, size= min(len(step_data) , number_of_data_per_step) , replace=False, p = prop_sel)
+                idx_chosen = np.random.choice(all_indexes, size= min(len(step_data) , mc_initial_configs) , replace=False, p = prop_sel)
             except ValueError:
-                idx_chosen = np.random.choice(all_indexes, size= min(len(step_data) , number_of_data_per_step) , replace=False, p = None)
+                idx_chosen = np.random.choice(all_indexes, size= min(len(step_data) , mc_initial_configs) , replace=False, p = None)
             
-            # select a subset of initial data (number_of_data_per_step)
+            # select a subset of initial data (mc_initial_configs)
             step_data = step_data.loc[idx_chosen]
             
             # evaluate previouss step
