@@ -1109,7 +1109,7 @@ class al_help():
         
         intersHandler.InteractionsForData(setup)
 
-        intersHandler.calc_descriptor_info()
+        intersHandler.calc_descriptor_info_serial()  # TEMP: Use serial to test force validation
         return
     
     @staticmethod
@@ -6822,14 +6822,11 @@ class Interactions():
                 d =  {t : None for t in vals.keys()}
                 
                 for t,pairs in vals.items():
-                    print (f'Serial: {intertype} : -->', t, potential_types[intertype])
                     # Skip types not in potential models
                     if potential_types is not None:
                         if intertype not in potential_types:
-                            print(f'Skipping {t}')
                             continue
                         if t not in potential_types[intertype]:
-                            print(f'Skipping {t}')
                             continue
                    
                     if intertype in ['connectivity','vdw']:
@@ -7005,7 +7002,6 @@ class Interactions():
             E.g., {'vdw': {('Ag', 'Ag'), ('O', 'O')}, 'angles': {('H', 'O', 'H')}, ...}
             All intertypes are included, even if empty.
         """
-        return None  # TEMP: Disable skip optimization to diagnose force validation issue
         # Initialize all intertypes with empty sets
         potential_types = {
             'connectivity': set(),
