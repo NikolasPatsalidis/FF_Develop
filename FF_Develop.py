@@ -3183,6 +3183,128 @@ class GeneralFunctions:
         return colors
     
     
+# =========== NJIT BATCH FUNCTIONS FOR DESCRIPTOR CALCULATIONS ===========
+
+@njit(fastmath=True, cache=True)
+def _apply_mic_batch_njit(diff, lattice, inv_lattice):
+    """Apply MIC to batch of displacement vectors (njit version)."""
+    N = diff.shape[0]
+    result = np.empty((N, 3), dtype=np.float64)
+    for i in range(N):
+        # Convert to fractional
+        s = np.zeros(3)
+        for j in range(3):
+            s[j] = diff[i, 0] * inv_lattice[0, j] + diff[i, 1] * inv_lattice[1, j] + diff[i, 2] * inv_lattice[2, j]
+        # Wrap to [-0.5, 0.5)
+        for j in range(3):
+            s[j] = s[j] - np.floor(s[j] + 0.5)
+        # Convert back to Cartesian
+        for j in range(3):
+            result[i, j] = s[0] * lattice[0, j] + s[1] * lattice[1, j] + s[2] * lattice[2, j]
+    return result
+
+@njit(fastmath=True, cache=True)
+def _calc_bonds_batch_njit(coords, i_indices, j_indices, use_mic, lattice, inv_lattice):
+    """Compute distances and unit vectors for batch of pairs (njit version)."""
+    N = len(i_indices)
+    r = np.empty(N, dtype=np.float64)
+    partial_ri = np.empty((N, 3), dtype=np.float64)
+    
+    for idx in range(N):
+        i = i_indices[idx]
+        j = j_indices[idx]
+        diff = np.array([coords[i, 0] - coords[j, 0], 
+                         coords[i, 1] - coords[j, 1], 
+                         coords[i, 2] - coords[j, 2]])
+        
+        if use_mic:
+            # Apply MIC inline
+            s = np.zeros(3)
+            for k in range(3):
+                s[k] = diff[0] * inv_lattice[0, k] + diff[1] * inv_lattice[1, k] + diff[2] * inv_lattice[2, k]
+            for k in range(3):
+                s[k] = s[k] - np.floor(s[k] + 0.5)
+            for k in range(3):
+                diff[k] = s[0] * lattice[0, k] + s[1] * lattice[1, k] + s[2] * lattice[2, k]
+        
+        dist = np.sqrt(diff[0]**2 + diff[1]**2 + diff[2]**2)
+        r[idx] = dist
+        partial_ri[idx, 0] = diff[0] / dist
+        partial_ri[idx, 1] = diff[1] / dist
+        partial_ri[idx, 2] = diff[2] / dist
+    
+    return r, partial_ri
+
+@njit(fastmath=True, cache=True)
+def _calc_angles_batch_njit(coords, i_indices, j_indices, k_indices, use_mic, lattice, inv_lattice):
+    """Compute angles and partial derivatives for batch of angle triples (njit version)."""
+    N = len(i_indices)
+    angles = np.empty(N, dtype=np.float64)
+    pa = np.empty((N, 3), dtype=np.float64)
+    pc = np.empty((N, 3), dtype=np.float64)
+    
+    for idx in range(N):
+        i = i_indices[idx]
+        j = j_indices[idx]
+        k = k_indices[idx]
+        
+        vij = np.array([coords[i, 0] - coords[j, 0],
+                        coords[i, 1] - coords[j, 1],
+                        coords[i, 2] - coords[j, 2]])
+        vkj = np.array([coords[k, 0] - coords[j, 0],
+                        coords[k, 1] - coords[j, 1],
+                        coords[k, 2] - coords[j, 2]])
+        
+        if use_mic:
+            # Apply MIC to vij
+            s = np.zeros(3)
+            for m in range(3):
+                s[m] = vij[0] * inv_lattice[0, m] + vij[1] * inv_lattice[1, m] + vij[2] * inv_lattice[2, m]
+            for m in range(3):
+                s[m] = s[m] - np.floor(s[m] + 0.5)
+            for m in range(3):
+                vij[m] = s[0] * lattice[0, m] + s[1] * lattice[1, m] + s[2] * lattice[2, m]
+            # Apply MIC to vkj
+            for m in range(3):
+                s[m] = vkj[0] * inv_lattice[0, m] + vkj[1] * inv_lattice[1, m] + vkj[2] * inv_lattice[2, m]
+            for m in range(3):
+                s[m] = s[m] - np.floor(s[m] + 0.5)
+            for m in range(3):
+                vkj[m] = s[0] * lattice[0, m] + s[1] * lattice[1, m] + s[2] * lattice[2, m]
+        
+        # Dot products and norms
+        a = vij[0] * vkj[0] + vij[1] * vkj[1] + vij[2] * vkj[2]
+        b = np.sqrt(vij[0]**2 + vij[1]**2 + vij[2]**2)
+        c = np.sqrt(vkj[0]**2 + vkj[1]**2 + vkj[2]**2)
+        bc = b * c
+        
+        # Partial derivatives
+        for m in range(3):
+            pa[idx, m] = vkj[m] / bc - a * vij[m] / (c * b**3)
+            pc[idx, m] = vij[m] / bc - a * vkj[m] / (b * c**3)
+        
+        # Angle
+        cth = a / bc
+        if cth > 1.0:
+            cth = 1.0
+        elif cth < -1.0:
+            cth = -1.0
+        angle = np.arccos(cth)
+        angles[idx] = angle
+        
+        # Chain rule
+        sin_th = np.sin(angle)
+        if sin_th < 1.49e-8:
+            sin_th = 1.49e-8
+        dth_dcth = -1.0 / sin_th
+        
+        for m in range(3):
+            pa[idx, m] *= dth_dcth
+            pc[idx, m] *= dth_dcth
+    
+    return angles, pa, pc
+
+
 class VectorGeometry:
     """Numba-accelerated vector geometry utilities for molecular calculations."""
     
@@ -3296,12 +3418,10 @@ class VectorGeometry:
         numpy.ndarray
             (N, 3) MIC-corrected displacement vectors.
         """
-        # Convert to fractional coordinates: s = diff @ inv_lattice
-        s = np.dot(diff, inv_lattice)
-        # Wrap to [-0.5, 0.5)
-        s = s - np.floor(s + 0.5)
-        # Convert back to Cartesian
-        return np.dot(s, lattice)
+        diff = np.ascontiguousarray(diff, dtype=np.float64)
+        lattice = np.ascontiguousarray(lattice, dtype=np.float64)
+        inv_lattice = np.ascontiguousarray(inv_lattice, dtype=np.float64)
+        return _apply_mic_batch_njit(diff, lattice, inv_lattice)
     
     @staticmethod
     def calc_bonds_batch(coords, i_indices, j_indices, lattice=None, inv_lattice=None):
@@ -3323,18 +3443,20 @@ class VectorGeometry:
         partial_ri : numpy.ndarray
             (N, 3) unit vectors from j to i.
         """
-        coords = np.asarray(coords, dtype=float)  # Handle list input
-        ri = coords[i_indices]  # (N, 3)
-        rj = coords[j_indices]  # (N, 3)
-        diff = ri - rj  # (N, 3)
+        coords = np.ascontiguousarray(coords, dtype=np.float64)
+        i_indices = np.ascontiguousarray(i_indices, dtype=np.int64)
+        j_indices = np.ascontiguousarray(j_indices, dtype=np.int64)
         
-        if lattice is not None:
-            diff = VectorGeometry.apply_mic_batch(diff, lattice, inv_lattice)
+        use_mic = lattice is not None
+        if use_mic:
+            lattice = np.ascontiguousarray(lattice, dtype=np.float64)
+            inv_lattice = np.ascontiguousarray(inv_lattice, dtype=np.float64)
+        else:
+            # Dummy arrays for njit (won't be used)
+            lattice = np.zeros((3, 3), dtype=np.float64)
+            inv_lattice = np.zeros((3, 3), dtype=np.float64)
         
-        r = np.linalg.norm(diff, axis=1)  # (N,)
-        partial_ri = diff / r[:, np.newaxis]  # (N, 3)
-        
-        return r, partial_ri
+        return _calc_bonds_batch_njit(coords, i_indices, j_indices, use_mic, lattice, inv_lattice)
     
     @staticmethod
     def calc_angles_batch(coords, i_indices, j_indices, k_indices, lattice=None, inv_lattice=None):
@@ -3358,47 +3480,20 @@ class VectorGeometry:
         pc : numpy.ndarray
             (N, 3) partial derivatives w.r.t. position k.
         """
-        coords = np.asarray(coords, dtype=float)
-        ri = coords[i_indices]  # (N, 3)
-        rj = coords[j_indices]  # (N, 3)
-        rk = coords[k_indices]  # (N, 3)
+        coords = np.ascontiguousarray(coords, dtype=np.float64)
+        i_indices = np.ascontiguousarray(i_indices, dtype=np.int64)
+        j_indices = np.ascontiguousarray(j_indices, dtype=np.int64)
+        k_indices = np.ascontiguousarray(k_indices, dtype=np.int64)
         
-        # Bond vectors
-        vij = ri - rj  # (N, 3)
-        vkj = rk - rj  # (N, 3)
+        use_mic = lattice is not None
+        if use_mic:
+            lattice = np.ascontiguousarray(lattice, dtype=np.float64)
+            inv_lattice = np.ascontiguousarray(inv_lattice, dtype=np.float64)
+        else:
+            lattice = np.zeros((3, 3), dtype=np.float64)
+            inv_lattice = np.zeros((3, 3), dtype=np.float64)
         
-        if lattice is not None:
-            vij = VectorGeometry.apply_mic_batch(vij, lattice, inv_lattice)
-            vkj = VectorGeometry.apply_mic_batch(vkj, lattice, inv_lattice)
-        
-        # Dot products and norms
-        a = np.sum(vij * vkj, axis=1)  # (N,) dot product
-        b = np.linalg.norm(vij, axis=1)  # (N,) |vij|
-        c = np.linalg.norm(vkj, axis=1)  # (N,) |vkj|
-        
-        bc = b * c  # (N,)
-        
-        # Partial derivatives of cos(theta) w.r.t. ri and rk
-        # fi = vkj/(b*c) - a*vij/(c*b^3)
-        # fk = vij/(b*c) - a*vkj/(b*c^3)
-        fi = vkj / bc[:, np.newaxis] - a[:, np.newaxis] * vij / (c * b**3)[:, np.newaxis]
-        fk = vij / bc[:, np.newaxis] - a[:, np.newaxis] * vkj / (b * c**3)[:, np.newaxis]
-        
-        # cos(theta) and angle
-        cth = a / bc
-        cth = np.clip(cth, -1.0, 1.0)  # Numerical safety
-        angles = np.arccos(cth)
-        
-        # Chain rule: dtheta/dcth = -1/sin(theta)
-        sin_th = np.sin(angles)
-        sin_th = np.maximum(sin_th, 1.49e-8)  # Avoid division by zero
-        dth_dcth = -1.0 / sin_th
-        
-        # Apply chain rule
-        pa = fi * dth_dcth[:, np.newaxis]
-        pc = fk * dth_dcth[:, np.newaxis]
-        
-        return angles, pa, pc
+        return _calc_angles_batch_njit(coords, i_indices, j_indices, k_indices, use_mic, lattice, inv_lattice)
     
     @staticmethod
     def calc_dihedrals_batch(coords, i_indices, j_indices, k_indices, l_indices, lattice=None, inv_lattice=None):
