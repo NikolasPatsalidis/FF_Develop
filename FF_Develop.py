@@ -7005,6 +7005,7 @@ class Interactions():
             E.g., {'vdw': {('Ag', 'Ag'), ('O', 'O')}, 'angles': {('H', 'O', 'H')}, ...}
             All intertypes are included, even if empty.
         """
+        return None  # TEMP: Disable skip optimization to diagnose force validation issue
         # Initialize all intertypes with empty sets
         potential_types = {
             'connectivity': set(),
