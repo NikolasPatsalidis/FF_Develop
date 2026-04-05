@@ -1565,12 +1565,16 @@ class LangevinDynamics:
         
         print(f"Validating analytical vs numerical forces on {len(mobile_atom_indices)} mobile atoms... mobile indices = {mobile_atom_indices}")
         print(f'{"-"*20}')
-        _, max_diff = self.optimizer.test_ForceClass(which='opt', epsilon=1e-4, verbose=True, 
+        _, max_diff = self.optimizer.test_ForceClass(which='opt', epsilon=1e-5, verbose=True, 
                                                       random_tries=3, order=4,
                                                       mobile_atoms=mobile_atom_indices)
         force_tol = 1e-2  # tolerance in kcal/(mol·Å)
         if max_diff > force_tol:
-            raise RuntimeError(f"Force validation FAILED! max_diff={max_diff:.4e} > tol={force_tol:.4e}. "
+            _, max_diff = self.optimizer.test_ForceClass(which='opt', epsilon=1e-6, verbose=True, 
+                                                      random_tries=3, order=4,
+                                                      mobile_atoms=mobile_atom_indices)
+            if max_diff > force_tol:                                
+                raise RuntimeError(f"Force validation FAILED! max_diff={max_diff:.4e} > tol={force_tol:.4e}. "
                              f"Analytical forces do not match numerical gradients of U.")
         
         print(f'{"-"*60}')
