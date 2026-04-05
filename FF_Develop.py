@@ -616,7 +616,7 @@ class al_help():
         """
         
         max_mc_steps = al_config.max_mc_steps
-        max_candidates_per_system = al_config.max_candidates_per_system
+        max_mc_candidates = al_config.max_mc_candidates
         mc_initial_configs = al_config.mc_initial_configs   
         asymptotic_steps = al_config.mc_asymptotic_steps
         fixed_types = al_config.fixed_types
@@ -680,7 +680,7 @@ class al_help():
             
             candidate_data_sys = pd.DataFrame()
 
-            while(step <= max_mc_steps and c_size <= max_candidates_per_system):
+            while(step <= max_mc_steps and c_size <= max_mc_candidates):
                 # get new corods via random walk
                 old_coords = copy.deepcopy(step_data['coords'].to_numpy().copy())
                 all_new_coords = al_help.random_walk_multiple(old_coords, sigma, at_types, fixed_types,
