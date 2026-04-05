@@ -8651,7 +8651,17 @@ class FF_Optimizer(Optimizer):
         
         
         
-        self.data.drop(columns=['descriptor_info', 'interactions'], inplace=True)
+        self.data.drop(columns=['descriptor_info'], inplace=True)  # Keep 'interactions' for topology
+        
+        def wrap_coord_if_periodic(coord, idx):
+            """Wrap single atom coordinate into periodic box if lattice exists."""
+            if 'lattice' in self.data.columns and self.data.loc[idx, 'lattice'] is not None:
+                lattice = np.array(self.data.loc[idx, 'lattice'], dtype=np.float64)
+                inv_lattice = np.linalg.inv(lattice)
+                frac = np.dot(coord, inv_lattice)
+                frac = frac - np.floor(frac)  # Wrap to [0, 1)
+                return np.dot(frac, lattice)
+            return coord
         
         coords_copy = copy.deepcopy(self.data['coords'].to_numpy())
         if verbose:
@@ -8675,25 +8685,29 @@ class FF_Optimizer(Optimizer):
                 for m,idx in enumerate(self.data.index):
                     atom_index = atoms_to_modify[m]
                     self.data['coords'][idx][atom_index][dir_index] += epsilon
+                    self.data['coords'][idx][atom_index] = wrap_coord_if_periodic(
+                        self.data['coords'][idx][atom_index], idx)
                     
-                al_help.make_interactions(self.data, self.setup)
+                al_help.update_descriptor_info(self.data, self.setup)  # Geometry only, keep topology
                 models_list_info = self.get_list_of_model_information(models, dataset)    
                 up1 = self.computeUclass(params, ndata, models_list_info)
                 
-                self.data.drop(columns=['descriptor_info', 'interactions', 'coords'], inplace=True)
+                self.data.drop(columns=['descriptor_info', 'coords'], inplace=True)
                 self.data['coords'] = copy.deepcopy(coords_copy)
                 
                 #um1
                 for m,idx in enumerate(self.data.index):
                     atom_index = atoms_to_modify[m]
                     self.data['coords'][idx][atom_index][dir_index] -= epsilon
+                    self.data['coords'][idx][atom_index] = wrap_coord_if_periodic(
+                        self.data['coords'][idx][atom_index], idx)
                 
-                al_help.make_interactions(self.data, self.setup)
+                al_help.update_descriptor_info(self.data, self.setup)  # Geometry only, keep topology
                 models_list_info = self.get_list_of_model_information(models, dataset)    
                
                 um1 = self.computeUclass(params, ndata, models_list_info)
                 
-                self.data.drop(columns=['descriptor_info', 'interactions', 'coords'], inplace=True)
+                self.data.drop(columns=['descriptor_info', 'coords'], inplace=True)
                 self.data['coords'] = copy.deepcopy(coords_copy)
                 
                 
@@ -8702,24 +8716,28 @@ class FF_Optimizer(Optimizer):
                     for m,idx in enumerate(self.data.index):
                         atom_index = atoms_to_modify[m]
                         self.data['coords'][idx][atom_index][dir_index] += 2*epsilon
+                        self.data['coords'][idx][atom_index] = wrap_coord_if_periodic(
+                            self.data['coords'][idx][atom_index], idx)
                         
-                    al_help.make_interactions(self.data, self.setup)
+                    al_help.update_descriptor_info(self.data, self.setup)  # Geometry only, keep topology
                     models_list_info = self.get_list_of_model_information(models, dataset)    
                     up2 = self.computeUclass(params, ndata, models_list_info)
                     
-                    self.data.drop(columns=['descriptor_info', 'interactions', 'coords'], inplace=True)
+                    self.data.drop(columns=['descriptor_info', 'coords'], inplace=True)
                     self.data['coords'] = copy.deepcopy(coords_copy)
                     
                     #um2
                     for m,idx in enumerate(self.data.index):
                         atom_index = atoms_to_modify[m]
                         self.data['coords'][idx][atom_index][dir_index] -= 2*epsilon
+                        self.data['coords'][idx][atom_index] = wrap_coord_if_periodic(
+                            self.data['coords'][idx][atom_index], idx)
                         
-                    al_help.make_interactions(self.data, self.setup)
+                    al_help.update_descriptor_info(self.data, self.setup)  # Geometry only, keep topology
                     models_list_info = self.get_list_of_model_information(models, dataset)    
                     um2 = self.computeUclass(params, ndata, models_list_info)
                     
-                    self.data.drop(columns=['descriptor_info', 'interactions', 'coords'], inplace=True)
+                    self.data.drop(columns=['descriptor_info', 'coords'], inplace=True)
                     self.data['coords'] = copy.deepcopy(coords_copy)
 
                 # F = -dU/dr, so numerical force = -(dU/dr) = -( (U(r+eps) - U(r-eps)) / 2eps )
