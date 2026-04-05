@@ -3185,12 +3185,12 @@ class GeneralFunctions:
     
 # =========== NJIT BATCH FUNCTIONS FOR DESCRIPTOR CALCULATIONS ===========
 
-@njit(fastmath=True, cache=True)
+@njit(fastmath=True, cache=True, parallel=True)
 def _apply_mic_batch_njit(diff, lattice, inv_lattice):
     """Apply MIC to batch of displacement vectors (njit version)."""
     N = diff.shape[0]
     result = np.empty((N, 3), dtype=np.float64)
-    for i in range(N):
+    for i in prange(N):
         # Convert to fractional
         s = np.zeros(3)
         for j in range(3):
@@ -3203,14 +3203,14 @@ def _apply_mic_batch_njit(diff, lattice, inv_lattice):
             result[i, j] = s[0] * lattice[0, j] + s[1] * lattice[1, j] + s[2] * lattice[2, j]
     return result
 
-@njit(fastmath=True, cache=True)
+@njit(fastmath=True, cache=True, parallel=True)
 def _calc_bonds_batch_njit(coords, i_indices, j_indices, use_mic, lattice, inv_lattice):
     """Compute distances and unit vectors for batch of pairs (njit version)."""
     N = len(i_indices)
     r = np.empty(N, dtype=np.float64)
     partial_ri = np.empty((N, 3), dtype=np.float64)
     
-    for idx in range(N):
+    for idx in prange(N):
         i = i_indices[idx]
         j = j_indices[idx]
         diff = np.array([coords[i, 0] - coords[j, 0], 
@@ -3235,7 +3235,7 @@ def _calc_bonds_batch_njit(coords, i_indices, j_indices, use_mic, lattice, inv_l
     
     return r, partial_ri
 
-@njit(fastmath=True, cache=True)
+@njit(fastmath=True, cache=True, parallel=True)
 def _calc_angles_batch_njit(coords, i_indices, j_indices, k_indices, use_mic, lattice, inv_lattice):
     """Compute angles and partial derivatives for batch of angle triples (njit version)."""
     N = len(i_indices)
@@ -3243,7 +3243,7 @@ def _calc_angles_batch_njit(coords, i_indices, j_indices, k_indices, use_mic, la
     pa = np.empty((N, 3), dtype=np.float64)
     pc = np.empty((N, 3), dtype=np.float64)
     
-    for idx in range(N):
+    for idx in prange(N):
         i = i_indices[idx]
         j = j_indices[idx]
         k = k_indices[idx]
