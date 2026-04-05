@@ -1109,7 +1109,7 @@ class al_help():
         
         intersHandler.InteractionsForData(setup)
 
-        intersHandler.calc_descriptor_info_serial()  # TEMP: Use serial to test force validation
+        intersHandler.calc_descriptor_info()
         return
     
     @staticmethod
@@ -8676,6 +8676,13 @@ class FF_Optimizer(Optimizer):
                 for m,idx in enumerate(self.data.index):
                     atom_index = atoms_to_modify[m]
                     self.data['coords'][idx][atom_index][dir_index] += epsilon
+                    # Wrap coordinates into periodic box if lattice exists
+                    if 'lattice' in self.data.columns and self.data.loc[idx, 'lattice'] is not None:
+                        lattice = np.array(self.data.loc[idx, 'lattice'], dtype=np.float64)
+                        inv_lattice = np.linalg.inv(lattice)
+                        frac = np.dot(self.data['coords'][idx][atom_index], inv_lattice)
+                        frac = frac - np.floor(frac)  # Wrap to [0, 1)
+                        self.data['coords'][idx][atom_index] = np.dot(frac, lattice)
                     
                 al_help.make_interactions(self.data, self.setup)
                 models_list_info = self.get_list_of_model_information(models, dataset)    
@@ -8688,6 +8695,13 @@ class FF_Optimizer(Optimizer):
                 for m,idx in enumerate(self.data.index):
                     atom_index = atoms_to_modify[m]
                     self.data['coords'][idx][atom_index][dir_index] -= epsilon
+                    # Wrap coordinates into periodic box if lattice exists
+                    if 'lattice' in self.data.columns and self.data.loc[idx, 'lattice'] is not None:
+                        lattice = np.array(self.data.loc[idx, 'lattice'], dtype=np.float64)
+                        inv_lattice = np.linalg.inv(lattice)
+                        frac = np.dot(self.data['coords'][idx][atom_index], inv_lattice)
+                        frac = frac - np.floor(frac)  # Wrap to [0, 1)
+                        self.data['coords'][idx][atom_index] = np.dot(frac, lattice)
                 
                 al_help.make_interactions(self.data, self.setup)
                 models_list_info = self.get_list_of_model_information(models, dataset)    
@@ -8703,6 +8717,13 @@ class FF_Optimizer(Optimizer):
                     for m,idx in enumerate(self.data.index):
                         atom_index = atoms_to_modify[m]
                         self.data['coords'][idx][atom_index][dir_index] += 2*epsilon
+                        # Wrap coordinates into periodic box if lattice exists
+                        if 'lattice' in self.data.columns and self.data.loc[idx, 'lattice'] is not None:
+                            lattice = np.array(self.data.loc[idx, 'lattice'], dtype=np.float64)
+                            inv_lattice = np.linalg.inv(lattice)
+                            frac = np.dot(self.data['coords'][idx][atom_index], inv_lattice)
+                            frac = frac - np.floor(frac)  # Wrap to [0, 1)
+                            self.data['coords'][idx][atom_index] = np.dot(frac, lattice)
                         
                     al_help.make_interactions(self.data, self.setup)
                     models_list_info = self.get_list_of_model_information(models, dataset)    
@@ -8711,9 +8732,17 @@ class FF_Optimizer(Optimizer):
                     self.data.drop(columns=['descriptor_info', 'interactions','coords' ], inplace=True)
                     self.data['coords'] = copy.deepcopy(coords_copy)
                     
+                    #um2
                     for m,idx in enumerate(self.data.index):
                         atom_index = atoms_to_modify[m]
                         self.data['coords'][idx][atom_index][dir_index] -= 2*epsilon
+                        # Wrap coordinates into periodic box if lattice exists
+                        if 'lattice' in self.data.columns and self.data.loc[idx, 'lattice'] is not None:
+                            lattice = np.array(self.data.loc[idx, 'lattice'], dtype=np.float64)
+                            inv_lattice = np.linalg.inv(lattice)
+                            frac = np.dot(self.data['coords'][idx][atom_index], inv_lattice)
+                            frac = frac - np.floor(frac)  # Wrap to [0, 1)
+                            self.data['coords'][idx][atom_index] = np.dot(frac, lattice)
                         
                     al_help.make_interactions(self.data, self.setup)
                     models_list_info = self.get_list_of_model_information(models, dataset)    
