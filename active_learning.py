@@ -1565,6 +1565,7 @@ class LangevinDynamics:
         
         print(f"Validating analytical vs numerical forces on {len(mobile_atom_indices)} mobile atoms... mobile indices = {mobile_atom_indices}")
         print(f'{"-"*20}')
+        
         _, max_diff = self.optimizer.test_ForceClass(which='opt', epsilon=1e-5, verbose=True, 
                                                       random_tries=3, order=4,
                                                       mobile_atoms=mobile_atom_indices)
