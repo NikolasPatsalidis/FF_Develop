@@ -8766,6 +8766,16 @@ class FF_Optimizer(Optimizer):
                     where_max_diff.append((m,atom_index,dir_index))
                     if verbose and diff.max()>1e-3:
                         print('data_point = {:d}, atom = {:d}, dir = {:d}, Fnum = {:.4e} , Fana = {:.4e} --> diff = {:.4e}'.format( m, atom_index, dir_index, fn_ad, fa_ad, diff))
+                        # Debug: print energy values for failing cases
+                        if order == 4:
+                            print(f'  DEBUG: up1={up1[m]:.6e}, um1={um1[m]:.6e}, up2={up2[m]:.6e}, um2={um2[m]:.6e}')
+                            print(f'  DEBUG: (up1-um1)/(2*eps)={(up1[m]-um1[m])/(2*epsilon):.6e}, 4th order={(- up2[m] + 8*up1[m] - 8*um1[m] + um2[m])/(12*epsilon):.6e}')
+                        else:
+                            print(f'  DEBUG: up1={up1[m]:.6e}, um1={um1[m]:.6e}, (up1-um1)/(2*eps)={(up1[m]-um1[m])/(2*epsilon):.6e}')
+                        # Debug: print interactions involving this atom
+                        idx = list(self.data.index)[m]
+                        inters = self.data.loc[idx, 'interactions']
+                        print(f'  DEBUG: Interaction types for data point {m}: {list(inters.keys())}')
             dmax = np.max(differences)
             dmean = np.mean(differences)
             print('random try {:d} --> max diff = {:4.3e}, mean diff = {:4.3e}'.format(random_try,dmax,dmean))
