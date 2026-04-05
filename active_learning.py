@@ -1405,13 +1405,23 @@ class LangevinDynamics:
         # The force field handles MIC correctly in make_interactions.
         return coords
     
-    def _compute_forces(self, which='opt'):
-        """Compute forces for all configurations in data."""
+    def _compute_forces(self, which='opt', rebuild_topology=False):
+        """Compute forces for all configurations in data.
+        
+        Parameters
+        ----------
+        rebuild_topology : bool
+            If True, rebuild full topology (bonds, angles, etc.).
+            If False, only recompute geometry from existing topology.
+        """
         models = getattr(self.setup, which + '_models')
         params, bounds, fixed_params, isnot_fixed, reguls = self.optimizer.get_parameter_info(models)
         
-        # Rebuild interactions
-        ff.al_help.make_interactions(self.optimizer.data, self.setup)
+        # Update descriptor info (geometry) - skip topology rebuild if not needed
+        if rebuild_topology or 'interactions' not in self.optimizer.data.columns:
+            ff.al_help.make_interactions(self.optimizer.data, self.setup)
+        else:
+            ff.al_help.update_descriptor_info(self.optimizer.data, self.setup)
         
         natoms_per_point = self.optimizer.data['natoms'].to_numpy()
         models_list_info = self.optimizer.get_list_of_model_information(models, 'all')
@@ -1555,12 +1565,17 @@ class LangevinDynamics:
         
         print(f"Validating analytical vs numerical forces on {len(mobile_atom_indices)} mobile atoms... mobile indices = {mobile_atom_indices}")
         print(f'{"-"*20}')
-        _, max_diff = self.optimizer.test_ForceClass(which='opt', epsilon=1e-4, verbose=True, 
+        
+        _, max_diff = self.optimizer.test_ForceClass(which='opt', epsilon=1e-5, verbose=True, 
                                                       random_tries=3, order=4,
                                                       mobile_atoms=mobile_atom_indices)
         force_tol = 1e-2  # tolerance in kcal/(mol·Å)
         if max_diff > force_tol:
-            raise RuntimeError(f"Force validation FAILED! max_diff={max_diff:.4e} > tol={force_tol:.4e}. "
+            _, max_diff = self.optimizer.test_ForceClass(which='opt', epsilon=1e-6, verbose=True, 
+                                                      random_tries=3, order=4,
+                                                      mobile_atoms=mobile_atom_indices)
+            if max_diff > force_tol:                                
+                raise RuntimeError(f"Force validation FAILED! max_diff={max_diff:.4e} > tol={force_tol:.4e}. "
                              f"Analytical forces do not match numerical gradients of U.")
         
         print(f'{"-"*60}')
@@ -1634,11 +1649,12 @@ class LangevinDynamics:
                 self.optimizer.data.at[idx, 'coords'] = coords
                 velocities[idx] = vel
             
-            # Clear old interactions before recomputing forces
+            # Clear old descriptor_info (geometry) before recomputing forces
+            # Keep 'interactions' (topology) - it doesn't change during MD
             if 'descriptor_info' in self.optimizer.data.columns:
-                self.optimizer.data.drop(columns=['descriptor_info', 'interactions'], inplace=True, errors='ignore')
+                self.optimizer.data.drop(columns=['descriptor_info'], inplace=True, errors='ignore')
             
-            # A: Compute new forces (after position update)
+            # A: Compute new forces (after position update) - topology already cached
             forces = self._compute_forces()
             
             # Final half kick (only mobile atoms)

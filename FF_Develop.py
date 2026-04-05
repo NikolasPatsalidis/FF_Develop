@@ -1108,6 +1108,32 @@ class al_help():
                                         rho_r0=setup.rho_r0,rho_rc=setup.rho_rc)
         
         intersHandler.InteractionsForData(setup)
+
+        intersHandler.calc_descriptor_info()
+        return
+    
+    @staticmethod
+    def update_descriptor_info(data, setup):
+        """Recompute descriptor geometry for existing topology.
+        
+        This is a lightweight alternative to make_interactions() for use during MD,
+        where topology (bonds, angles, dihedrals) doesn't change but coordinates do.
+        Requires that 'interactions' column already exists from a prior make_interactions call.
+        
+        Parameters
+        ----------
+        data : pandas.DataFrame
+            Dataset with 'interactions' column already populated.
+        setup : Setup_Interfacial_Optimization
+            Configuration containing rho parameters.
+        """
+        intersHandler = Interactions(data, setup, atom_model=setup.representation,
+                                     find_vdw_connected=False,
+                                     find_vdw_unconnected=False,
+                                     find_angles=False,
+                                     find_dihedrals=False,
+                                     find_densities=False,
+                                     rho_r0=setup.rho_r0, rho_rc=setup.rho_rc)
         intersHandler.calc_descriptor_info()
         return
     
@@ -1755,6 +1781,15 @@ class al_help():
         GeneralFunctions.make_dir(setup.runpath)
         
         al_help.make_interactions(data,setup)
+        
+        # Test descriptor calculations if requested
+        if setup.test_descriptors:
+            inter = Interactions(data, setup,
+                                vdw_bond_dist=3,
+                                rho_r0=setup.rho_r0,rho_rc=setup.rho_rc)
+        
+            inter.InteractionsForData(setup)
+            inter.test_descriptor_calculations(tol=1e-6)
         dataMan = Data_Manager(data,setup)
         train_indexes, dev_indexes = dataMan.train_development_split()
         
@@ -3240,6 +3275,268 @@ class VectorGeometry:
         r = r1 - r2
         d = np.sqrt(np.dot(r,r))
         return r/d
+    
+    # =========== VECTORIZED VERSIONS ===========
+    
+    @staticmethod
+    def apply_mic_batch(diff, lattice, inv_lattice):
+        """Apply MIC to batch of displacement vectors.
+        
+        Parameters
+        ----------
+        diff : numpy.ndarray
+            (N, 3) array of displacement vectors.
+        lattice : numpy.ndarray
+            (3, 3) lattice vectors.
+        inv_lattice : numpy.ndarray
+            (3, 3) inverse lattice.
+            
+        Returns
+        -------
+        numpy.ndarray
+            (N, 3) MIC-corrected displacement vectors.
+        """
+        # Convert to fractional coordinates: s = diff @ inv_lattice
+        s = np.dot(diff, inv_lattice)
+        # Wrap to [-0.5, 0.5)
+        s = s - np.floor(s + 0.5)
+        # Convert back to Cartesian
+        return np.dot(s, lattice)
+    
+    @staticmethod
+    def calc_bonds_batch(coords, i_indices, j_indices, lattice=None, inv_lattice=None):
+        """Compute distances and unit vectors for batch of pairs.
+        
+        Parameters
+        ----------
+        coords : numpy.ndarray or list
+            (natoms, 3) coordinate array.
+        i_indices, j_indices : numpy.ndarray
+            (N,) arrays of atom indices for pairs.
+        lattice, inv_lattice : numpy.ndarray or None
+            Lattice matrices for MIC, or None for non-periodic.
+            
+        Returns
+        -------
+        r : numpy.ndarray
+            (N,) distances.
+        partial_ri : numpy.ndarray
+            (N, 3) unit vectors from j to i.
+        """
+        coords = np.asarray(coords, dtype=float)  # Handle list input
+        ri = coords[i_indices]  # (N, 3)
+        rj = coords[j_indices]  # (N, 3)
+        diff = ri - rj  # (N, 3)
+        
+        if lattice is not None:
+            diff = VectorGeometry.apply_mic_batch(diff, lattice, inv_lattice)
+        
+        r = np.linalg.norm(diff, axis=1)  # (N,)
+        partial_ri = diff / r[:, np.newaxis]  # (N, 3)
+        
+        return r, partial_ri
+    
+    @staticmethod
+    def calc_angles_batch(coords, i_indices, j_indices, k_indices, lattice=None, inv_lattice=None):
+        """Compute angles and partial derivatives for batch of angle triples.
+        
+        Parameters
+        ----------
+        coords : numpy.ndarray or list
+            (natoms, 3) coordinate array.
+        i_indices, j_indices, k_indices : numpy.ndarray
+            (N,) arrays of atom indices for angle i-j-k (j is center).
+        lattice, inv_lattice : numpy.ndarray or None
+            Lattice matrices for MIC, or None for non-periodic.
+            
+        Returns
+        -------
+        angles : numpy.ndarray
+            (N,) angle values in radians.
+        pa : numpy.ndarray
+            (N, 3) partial derivatives w.r.t. position i.
+        pc : numpy.ndarray
+            (N, 3) partial derivatives w.r.t. position k.
+        """
+        coords = np.asarray(coords, dtype=float)
+        ri = coords[i_indices]  # (N, 3)
+        rj = coords[j_indices]  # (N, 3)
+        rk = coords[k_indices]  # (N, 3)
+        
+        # Bond vectors
+        vij = ri - rj  # (N, 3)
+        vkj = rk - rj  # (N, 3)
+        
+        if lattice is not None:
+            vij = VectorGeometry.apply_mic_batch(vij, lattice, inv_lattice)
+            vkj = VectorGeometry.apply_mic_batch(vkj, lattice, inv_lattice)
+        
+        # Dot products and norms
+        a = np.sum(vij * vkj, axis=1)  # (N,) dot product
+        b = np.linalg.norm(vij, axis=1)  # (N,) |vij|
+        c = np.linalg.norm(vkj, axis=1)  # (N,) |vkj|
+        
+        bc = b * c  # (N,)
+        
+        # Partial derivatives of cos(theta) w.r.t. ri and rk
+        # fi = vkj/(b*c) - a*vij/(c*b^3)
+        # fk = vij/(b*c) - a*vkj/(b*c^3)
+        fi = vkj / bc[:, np.newaxis] - a[:, np.newaxis] * vij / (c * b**3)[:, np.newaxis]
+        fk = vij / bc[:, np.newaxis] - a[:, np.newaxis] * vkj / (b * c**3)[:, np.newaxis]
+        
+        # cos(theta) and angle
+        cth = a / bc
+        cth = np.clip(cth, -1.0, 1.0)  # Numerical safety
+        angles = np.arccos(cth)
+        
+        # Chain rule: dtheta/dcth = -1/sin(theta)
+        sin_th = np.sin(angles)
+        sin_th = np.maximum(sin_th, 1.49e-8)  # Avoid division by zero
+        dth_dcth = -1.0 / sin_th
+        
+        # Apply chain rule
+        pa = fi * dth_dcth[:, np.newaxis]
+        pc = fk * dth_dcth[:, np.newaxis]
+        
+        return angles, pa, pc
+    
+    @staticmethod
+    def calc_dihedrals_batch(coords, i_indices, j_indices, k_indices, l_indices, lattice=None, inv_lattice=None):
+        """Compute dihedral angles and gradients for batch of quadruplets.
+        
+        Parameters
+        ----------
+        coords : numpy.ndarray or list
+            (natoms, 3) coordinate array.
+        i_indices, j_indices, k_indices, l_indices : numpy.ndarray
+            (N,) arrays of atom indices for dihedral i-j-k-l.
+        lattice, inv_lattice : numpy.ndarray or None
+            Lattice matrices for MIC, or None for non-periodic.
+            
+        Returns
+        -------
+        dihedrals : numpy.ndarray
+            (N,) dihedral angle values in radians.
+        dri, drj, drk, drl : numpy.ndarray
+            (N, 3) gradients w.r.t. each atom position.
+        """
+        coords = np.asarray(coords, dtype=float)
+        ri = coords[i_indices]  # (N, 3)
+        rj = coords[j_indices]  # (N, 3)
+        rk = coords[k_indices]  # (N, 3)
+        rl = coords[l_indices]  # (N, 3)
+        
+        # Bond vectors
+        b1 = rj - ri  # (N, 3)
+        b2 = rk - rj  # (N, 3)
+        b3 = rl - rk  # (N, 3)
+        
+        if lattice is not None:
+            b1 = VectorGeometry.apply_mic_batch(b1, lattice, inv_lattice)
+            b2 = VectorGeometry.apply_mic_batch(b2, lattice, inv_lattice)
+            b3 = VectorGeometry.apply_mic_batch(b3, lattice, inv_lattice)
+        
+        # Normal vectors to planes
+        n1 = np.cross(b1, b2)  # (N, 3)
+        n2 = np.cross(b2, b3)  # (N, 3)
+        
+        # Normalized b2
+        b2_norm = np.linalg.norm(b2, axis=1, keepdims=True)
+        nb2 = b2 / np.maximum(b2_norm, 1e-10)  # (N, 3)
+        
+        # m1 = n1 x nb2
+        m1 = np.cross(n1, nb2)  # (N, 3)
+        
+        # x = n1 . n2, y = m1 . n2
+        x = np.sum(n1 * n2, axis=1)  # (N,)
+        y = np.sum(m1 * n2, axis=1)  # (N,)
+        
+        # Dihedral angle
+        dihedrals = np.arctan2(y, x)  # (N,)
+        
+        # Gradients - computed per dihedral (vectorization of gradient is complex)
+        N = len(i_indices)
+        dri = np.empty((N, 3), dtype=float)
+        drj = np.empty((N, 3), dtype=float)
+        drk = np.empty((N, 3), dtype=float)
+        drl = np.empty((N, 3), dtype=float)
+        
+        for ip in range(N):
+            grad = VectorGeometry._calc_dihedral_grad_from_bonds(
+                b1[ip], b2[ip], b3[ip], n1[ip], n2[ip], nb2[ip], m1[ip], x[ip], y[ip]
+            )
+            dri[ip] = grad[0]
+            drj[ip] = grad[1]
+            drk[ip] = grad[2]
+            drl[ip] = grad[3]
+        
+        return dihedrals, dri, drj, drk, drl
+    
+    @staticmethod
+    def _calc_dihedral_grad_from_bonds(b1, b2, b3, n1, n2, nb2, m1, x, y):
+        """Compute dihedral gradient from precomputed bond vectors."""
+        grad = np.zeros((4, 3), dtype=np.float64)
+        
+        denom = x**2 + y**2
+        if denom < 1e-20:
+            return grad
+            
+        dwdx = -y / denom
+        dwdy = x / denom
+        
+        # dwdri calculation
+        dxdn1 = n2
+        dydm1 = n2
+        
+        dm1dn1 = VectorGeometry.derivative_cross_product_wrt_first(n1, nb2)
+        dn1db1 = VectorGeometry.derivative_cross_product_wrt_first(b1, b2)
+        dwdm1 = dwdy * dydm1.T
+        db1dri = -1
+        dwdn1 = dwdx * dxdn1.T + np.dot(dwdm1, dm1dn1).T
+        
+        dwdb1 = np.dot(dwdn1, dn1db1)
+        grad[0] = dwdb1 * db1dri
+        
+        # dwdrj calculation
+        db1drj = 1
+        db2drj = -1
+        
+        T1 = dwdb1 * db1drj
+        
+        dn1db2 = VectorGeometry.derivative_cross_product_wrt_second(b1, b2)
+        T21 = np.dot(dwdn1, dn1db2)
+        
+        dn2db2 = VectorGeometry.derivative_cross_product_wrt_first(b2, b3)
+        dxdn2 = n1
+        dydn2 = m1
+        dwdn2 = (dwdx * dxdn2 + dwdy * dydn2).T
+        T22 = np.dot(dwdn2, dn2db2)
+        
+        dnb2db2 = VectorGeometry.derivative_normalized_vector(b2)
+        dm1dnb2 = VectorGeometry.derivative_cross_product_wrt_second(n1, nb2)
+        
+        dwdnb2 = np.dot(dwdm1, dm1dnb2).T
+        T23 = np.dot(dwdnb2, dnb2db2)
+        
+        dwdb2 = T21 + T22 + T23
+        
+        grad[1] = T1 + dwdb2 * db2drj
+        
+        # dwdrk calculation
+        db2drk = 1
+        db3drk = -1
+        
+        dwdb3 = VectorGeometry.derivative_cross_product_wrt_second(b2, b3)
+        dwdb3 = np.dot(dwdn2, dwdb3)
+        A1 = dwdb2 * db2drk
+        A2 = dwdb3 * db3drk
+        grad[2] = A1 + A2
+        
+        # dwdrl calculation
+        db3drl = 1
+        grad[3] = dwdb3 * db3drl
+        
+        return grad
     
     @jit(nopython=True,fastmath=True)
     def calc_angle_pa_pc(ri,rj,rk):
@@ -5123,6 +5420,8 @@ class Setup_Interfacial_Optimization():
         'rho_r0' : 0.1,
         'rho_rc': 5.5,
         
+        'test_descriptors': False,
+        
         'distance_map':"dict()",
         'reference_energy':"dict()",
         'struct_types':"[('type1'),('type2','type3')]",
@@ -5855,9 +6154,9 @@ class Interactions():
     """
     
     def __init__(self,data,setup,atom_model = 'AA',
-            vdw_bond_dist=4, find_vdw_unconnected = True,
-            find_bonds=False, find_vdw_connected=True,
-            find_dihedrals=False,find_angles=True,find_densities=False,
+            vdw_bond_dist=3, find_vdw_unconnected = True,
+            find_bonds=True, find_vdw_connected=True,
+            find_dihedrals=True,find_angles=True,find_densities=True,
             excludedBondtypes=[],**kwargs):
         """Initialize interaction handler with configuration options."""
         self.setup = setup
@@ -6143,7 +6442,7 @@ class Interactions():
     @staticmethod
     def get_vdw(types,bond_d_matrix,find_vdw_connected,
                  find_vdw_unconnected,
-                 vdw_bond_dist=4):
+                 vdw_bond_dist=3):
         """Combine connected and unconnected van der Waals pairs."""
         if find_vdw_unconnected:
             vdw_unc = Interactions.get_vdw_unconnected(types,bond_d_matrix)
@@ -6479,13 +6778,14 @@ class Interactions():
 
         self.data['neibs'] = all_neibs       
         return
-    
-    
-    def calc_descriptor_info(self):
+
+    def calc_descriptor_info_serial(self):
         """Compute full descriptor info including values and gradients for all configurations.
-        
+        Calculated in a serial manner.
         If the data contains a 'lattice' column with (3,3) lattice vectors,
         minimum image convention is applied for periodic boundary conditions.
+        
+        Only computes descriptors for types that exist in the potential models.
         """
         
         n = len(self.data)
@@ -6494,6 +6794,9 @@ class Interactions():
         
         atom_confs = np.array(self.data['coords'])
         interactions = np.array(self.data['interactions'])
+        
+        # Get types used in potential to skip unnecessary calculations
+        potential_types = self.get_potential_types()
         
         # Check if lattice column exists
         has_lattice_column = 'lattice' in self.data.columns
@@ -6519,7 +6822,12 @@ class Interactions():
                 d =  {t : None for t in vals.keys()}
                 
                 for t,pairs in vals.items():
-                    
+                    # Skip types not in potential models
+                    if potential_types is not None:
+                        if intertype not in potential_types:
+                            continue
+                        if t not in potential_types[intertype]:
+                            continue
                    
                     if intertype in ['connectivity','vdw']:
                         
@@ -6682,7 +6990,317 @@ class Interactions():
     
             all_descriptor_info[m] = descriptor_info
         self.data['descriptor_info'] = all_descriptor_info 
+        return  
+    
+    def get_potential_types(self):
+        """Get the types used in the potential from setup.
+        
+        Returns
+        -------
+        dict
+            Dictionary mapping feature (intertype) to set of types used in potential.
+            E.g., {'vdw': {('Ag', 'Ag'), ('O', 'O')}, 'angles': {('H', 'O', 'H')}, ...}
+            All intertypes are included, even if empty.
+        """
+        # Initialize all intertypes with empty sets
+        potential_types = {
+            'connectivity': set(),
+            'vdw': set(),
+            'angles': set(),
+            'dihedrals': set(),
+            'rhos': set()
+        }
+        
+        # Try opt_models first, then init_models
+        try:
+            models = getattr(self.setup, 'opt_models')
+        except AttributeError:
+            try:
+                models = getattr(self.setup, 'init_models')
+            except AttributeError:
+                return None  # No models defined, compute all
+        
+        for name, model in models.items():
+            feature = model.feature
+            ty = model.type
+            potential_types[feature].add(ty)
+        
+        return potential_types
+    
+    def calc_descriptor_info(self):
+        """Compute full descriptor info including values and gradients for all configurations.
+        
+        If the data contains a 'lattice' column with (3,3) lattice vectors,
+        minimum image convention is applied for periodic boundary conditions.
+        
+        Only computes descriptors for types that exist in the potential models.
+        """
+        
+        n = len(self.data)
+        
+        all_descriptor_info = np.empty(n ,dtype=object)
+        
+        atom_confs = np.array(self.data['coords'])
+        interactions = np.array(self.data['interactions'])
+        
+        # Get types used in potential to skip unnecessary calculations
+        potential_types = self.get_potential_types()
+        
+        # Check if lattice column exists
+        has_lattice_column = 'lattice' in self.data.columns
+        if has_lattice_column:
+            lattices = np.array(self.data['lattice'])
+        
+        for m, ac, inters in zip(range(n), atom_confs, interactions):
+            
+            descriptor_info = dict(keys=inters.keys())
+            
+            # Check per-datapoint if lattice is not None
+            use_mic = False
+            if has_lattice_column and lattices[m] is not None:
+                lattice = np.array(lattices[m], dtype=np.float64)
+                inv_lattice = np.linalg.inv(lattice)
+                use_mic = True
+            else:
+                lattice = None
+                inv_lattice = None
+            
+            for intertype,vals in inters.items():
+                
+                d =  {t : None for t in vals.keys()}
+                
+                for t,pairs in vals.items():
+                    
+                    # Skip types not in potential models
+                    if potential_types is not None:
+                        if intertype not in potential_types:
+                            continue
+                        if t not in potential_types[intertype]:
+                            continue
+                   
+                    if intertype in ['connectivity','vdw']:
+                        
+                        # Vectorized bond calculation
+                        pairs_arr = np.array(pairs, dtype=int)
+                        i_index = pairs_arr[:, 0]
+                        j_index = pairs_arr[:, 1]
+                        
+                        r, partial_ri = VectorGeometry.calc_bonds_batch(
+                            ac, i_index, j_index, 
+                            lattice if use_mic else None,
+                            inv_lattice if use_mic else None
+                        )
+                       
+                        temp = {'values':r, 'partial_ri':partial_ri,
+                                'i_index':i_index,'j_index':j_index}
+                        
+                    elif intertype=='angles':
+                        
+                        # Vectorized angle calculation
+                        pairs_arr = np.array(pairs, dtype=int)
+                        i_index = pairs_arr[:, 0]
+                        j_index = pairs_arr[:, 1]
+                        k_index = pairs_arr[:, 2]
+                        
+                        angles, pa, pc = VectorGeometry.calc_angles_batch(
+                            ac, i_index, j_index, k_index,
+                            lattice if use_mic else None,
+                            inv_lattice if use_mic else None
+                        )
+                        
+                        temp = {'values':angles, 'pa':pa, 'pc': pc,
+                                'i_index':i_index, 'j_index':j_index,
+                                'k_index': k_index}
+                    
+                    elif intertype =='dihedrals':
+                        
+                        # Vectorized dihedral calculation
+                        pairs_arr = np.array(pairs, dtype=int)
+                        i_index = pairs_arr[:, 0]
+                        j_index = pairs_arr[:, 1]
+                        k_index = pairs_arr[:, 2]
+                        l_index = pairs_arr[:, 3]
+                        
+                        dihedrals, dri, drj, drk, drl = VectorGeometry.calc_dihedrals_batch(
+                            ac, i_index, j_index, k_index, l_index,
+                            lattice if use_mic else None,
+                            inv_lattice if use_mic else None
+                        )
+                            
+                        temp = {'values':dihedrals, 'dri':dri, 'drj': drj,
+                                'drk':drk,'drl':drl,
+                                'i_index':i_index, 'j_index':j_index,
+                                'k_index': k_index, 'l_index': l_index}
+                        
+                    elif intertype=='rhos':
+                        r0 = self.rho_r0
+                        rc = self.rho_rc
+                        
+                        n_rhos = len(pairs) 
+                        
+                        rhos  = np.empty(n_rhos, dtype=float)
+                        
+                        npairs = np.sum([len(v) for v in pairs])
+                        
+                        v_ij = np.empty( (npairs,3), dtype=float)
+                        
+                        i_index = np.empty(npairs,dtype=int)
+                        j_index = np.empty(npairs,dtype=int)
+                        to_pair_index = np.empty(npairs,dtype=int)
+                        
+                        c = self.compute_coeff(r0, rc)
+                        
+                        tot_iter = 0
+                        for iv in range(n_rhos):
+                            rho = 0
+                            for ip,p in enumerate(pairs[iv]):
+                                i,j  = p 
+                                r1 = np.array(ac[i]) 
+                                r2 = np.array(ac[j])
+                                
+                                i_index[tot_iter] = i
+                                j_index[tot_iter] = j
+                                to_pair_index[tot_iter] = iv
+                                
+                                if use_mic:
+                                    r12 = VectorGeometry.calc_dist_mic(r1, r2, lattice, inv_lattice)
+                                    dirvec = self.dphi_rho(r12, c, r0, rc) * VectorGeometry.calc_unitvec_mic(r1, r2, lattice, inv_lattice)
+                                else:
+                                    r12 = VectorGeometry.calc_dist(r1, r2)
+                                    dirvec = self.dphi_rho(r12, c, r0, rc) * VectorGeometry.calc_unitvec(r1, r2)
+                                v_ij[tot_iter] = dirvec
+                                
+                                rho += self.phi_rho(r12,c,r0,rc)
+
+                                tot_iter+=1
+                                
+                            rhos[iv] = rho
+                        temp = {'values':rhos,'n_central':n_rhos , 
+                                'v_ij':v_ij,'to_pair_index':to_pair_index,
+                                'i_index':i_index,'j_index':j_index}
+                    else:
+                        raise Exception(NotImplemented)
+                    
+                    d[t] = temp.copy()
+                           
+                descriptor_info[intertype] = d.copy()
+    
+            all_descriptor_info[m] = descriptor_info
+        self.data['descriptor_info'] = all_descriptor_info 
         return
+    
+    def test_descriptor_calculations(self, tol=1e-6):
+        """Compare serial vs vectorized descriptor calculations.
+        
+        Parameters
+        ----------
+        tol : float
+            Tolerance for numerical differences. Default 1e-6.
+            
+        Returns
+        -------
+        bool
+            True if all tests pass, raises AssertionError otherwise.
+        """
+        print("\n" + "="*60)
+        print("TESTING DESCRIPTOR CALCULATIONS: Serial vs Vectorized")
+        print("="*60)
+        
+        # Compute with serial method
+        print("Computing descriptors with SERIAL method...")
+        self.calc_descriptor_info_serial()
+        # Store serial results by extracting values (avoid deepcopy issues with dict_keys)
+        serial_info = []
+        for desc in self.data['descriptor_info'].values:
+            serial_desc = {}
+            for intertype, vals in desc.items():
+                if intertype == 'keys':
+                    continue
+                serial_desc[intertype] = {}
+                for t, data in vals.items():
+                    if data is None:  # Skip types not in potential
+                        continue
+                    serial_desc[intertype][t] = {k: np.array(v).copy() for k, v in data.items()}
+            serial_info.append(serial_desc)
+        
+        # Compute with vectorized method
+        print("Computing descriptors with VECTORIZED method...")
+        self.calc_descriptor_info()
+        vectorized_info = self.data['descriptor_info'].values
+        
+        # Compare results
+        n_configs = len(serial_info)
+        all_passed = True
+        global_max_diff = 0.0
+        global_max_info = None
+        
+        for m in range(n_configs):
+            serial_desc = serial_info[m]
+            vec_desc = vectorized_info[m]
+            
+            for intertype in serial_desc.keys():
+                serial_inter = serial_desc[intertype]
+                vec_inter = vec_desc[intertype]
+                
+                for t in serial_inter.keys():
+                    serial_data = serial_inter[t]
+                    vec_data = vec_inter[t]
+                    
+                    print( f' Cheking {intertype}, type {t}' )
+                    sys.stdout.flush()
+                    
+                    for key in serial_data.keys():
+                        s_val = np.array(serial_data[key])
+                        v_val = np.array(vec_data[key])
+                            
+                        
+                        if s_val.dtype in [np.float64, np.float32, float]:
+                            diff = np.abs(s_val - v_val)
+                            max_diff = np.max(diff)
+                            if max_diff > tol:
+                                print(f"FAILED: Config {m}, {intertype}, type {t}, key '{key}'")
+                                print(f"  Max difference: {max_diff:.2e} (tolerance: {tol:.2e})")
+                                all_passed = False
+                            # Track global max difference
+                            if max_diff > global_max_diff:
+                                global_max_diff = max_diff
+                                max_idx = np.unravel_index(np.argmax(diff), diff.shape)
+                                global_max_info = {
+                                    'datapoint': m,
+                                    'intertype': intertype,
+                                    'pair_type': t,
+                                    'key': key,
+                                    'pair_index': max_idx[0] if len(max_idx) > 0 else 0,
+                                    'serial_val': s_val[max_idx] if s_val.ndim > 0 else s_val,
+                                    'vec_val': v_val[max_idx] if v_val.ndim > 0 else v_val
+                                }
+                        else:
+                            # Integer indices - must match exactly
+                            if not np.array_equal(s_val, v_val):
+                                print(f"FAILED: Config {m}, {intertype}, type {t}, key '{key}'")
+                                print(f"  Index mismatch")
+                                all_passed = False
+        
+        # Print global max difference info
+        print("\n" + "-"*60)
+        print(f"GLOBAL MAX DIFFERENCE: {global_max_diff:.2e}")
+        if global_max_info:
+            print(f"  Datapoint: {global_max_info['datapoint']}")
+            print(f"  Intertype: {global_max_info['intertype']}")
+            print(f"  Pair type: {global_max_info['pair_type']}")
+            print(f"  Key: {global_max_info['key']}")
+            print(f"  Pair index: {global_max_info['pair_index']}")
+            print(f"  Serial value: {global_max_info['serial_val']}")
+            print(f"  Vectorized value: {global_max_info['vec_val']}")
+        print("-"*60)
+        
+        if all_passed:
+            print("\nALL TESTS PASSED! Serial and vectorized results match.")
+            print(f"Tested {n_configs} configurations with tolerance {tol:.2e}\n")
+        else:
+            raise AssertionError("Descriptor calculation test FAILED! See differences above.")
+        
+        return True
 
 class Data_Manager():
     """Utility class for managing molecular datasets.
@@ -8033,8 +8651,17 @@ class FF_Optimizer(Optimizer):
         
         
         
-        self.data.drop(columns=['descriptor_info', 'interactions' ], inplace=True)
+        self.data.drop(columns=['descriptor_info'], inplace=True)  # Keep 'interactions' for topology
         
+        def wrap_coord_if_periodic(coord, idx):
+            """Wrap single atom coordinate into periodic box if lattice exists."""
+            if 'lattice' in self.data.columns and self.data.loc[idx, 'lattice'] is not None:
+                lattice = np.array(self.data.loc[idx, 'lattice'], dtype=np.float64)
+                inv_lattice = np.linalg.inv(lattice)
+                frac = np.dot(coord, inv_lattice)
+                frac = frac - np.floor(frac)  # Wrap to [0, 1)
+                return np.dot(frac, lattice)
+            return coord
         
         coords_copy = copy.deepcopy(self.data['coords'].to_numpy())
         if verbose:
@@ -8058,25 +8685,29 @@ class FF_Optimizer(Optimizer):
                 for m,idx in enumerate(self.data.index):
                     atom_index = atoms_to_modify[m]
                     self.data['coords'][idx][atom_index][dir_index] += epsilon
+                    self.data['coords'][idx][atom_index] = wrap_coord_if_periodic(
+                        self.data['coords'][idx][atom_index], idx)
                     
-                al_help.make_interactions(self.data, self.setup)
+                al_help.update_descriptor_info(self.data, self.setup)  # Geometry only, keep topology
                 models_list_info = self.get_list_of_model_information(models, dataset)    
                 up1 = self.computeUclass(params, ndata, models_list_info)
                 
-                self.data.drop(columns=['descriptor_info', 'interactions','coords' ], inplace=True)
+                self.data.drop(columns=['descriptor_info', 'coords'], inplace=True)
                 self.data['coords'] = copy.deepcopy(coords_copy)
                 
                 #um1
                 for m,idx in enumerate(self.data.index):
                     atom_index = atoms_to_modify[m]
                     self.data['coords'][idx][atom_index][dir_index] -= epsilon
+                    self.data['coords'][idx][atom_index] = wrap_coord_if_periodic(
+                        self.data['coords'][idx][atom_index], idx)
                 
-                al_help.make_interactions(self.data, self.setup)
+                al_help.update_descriptor_info(self.data, self.setup)  # Geometry only, keep topology
                 models_list_info = self.get_list_of_model_information(models, dataset)    
                
                 um1 = self.computeUclass(params, ndata, models_list_info)
                 
-                self.data.drop(columns=['descriptor_info', 'interactions','coords' ], inplace=True)
+                self.data.drop(columns=['descriptor_info', 'coords'], inplace=True)
                 self.data['coords'] = copy.deepcopy(coords_copy)
                 
                 
@@ -8085,23 +8716,28 @@ class FF_Optimizer(Optimizer):
                     for m,idx in enumerate(self.data.index):
                         atom_index = atoms_to_modify[m]
                         self.data['coords'][idx][atom_index][dir_index] += 2*epsilon
+                        self.data['coords'][idx][atom_index] = wrap_coord_if_periodic(
+                            self.data['coords'][idx][atom_index], idx)
                         
-                    al_help.make_interactions(self.data, self.setup)
+                    al_help.update_descriptor_info(self.data, self.setup)  # Geometry only, keep topology
                     models_list_info = self.get_list_of_model_information(models, dataset)    
                     up2 = self.computeUclass(params, ndata, models_list_info)
                     
-                    self.data.drop(columns=['descriptor_info', 'interactions','coords' ], inplace=True)
+                    self.data.drop(columns=['descriptor_info', 'coords'], inplace=True)
                     self.data['coords'] = copy.deepcopy(coords_copy)
                     
+                    #um2
                     for m,idx in enumerate(self.data.index):
                         atom_index = atoms_to_modify[m]
                         self.data['coords'][idx][atom_index][dir_index] -= 2*epsilon
+                        self.data['coords'][idx][atom_index] = wrap_coord_if_periodic(
+                            self.data['coords'][idx][atom_index], idx)
                         
-                    al_help.make_interactions(self.data, self.setup)
+                    al_help.update_descriptor_info(self.data, self.setup)  # Geometry only, keep topology
                     models_list_info = self.get_list_of_model_information(models, dataset)    
                     um2 = self.computeUclass(params, ndata, models_list_info)
                     
-                    self.data.drop(columns=['descriptor_info', 'interactions','coords' ], inplace=True)
+                    self.data.drop(columns=['descriptor_info', 'coords'], inplace=True)
                     self.data['coords'] = copy.deepcopy(coords_copy)
 
                 # F = -dU/dr, so numerical force = -(dU/dr) = -( (U(r+eps) - U(r-eps)) / 2eps )
@@ -8130,6 +8766,16 @@ class FF_Optimizer(Optimizer):
                     where_max_diff.append((m,atom_index,dir_index))
                     if verbose and diff.max()>1e-3:
                         print('data_point = {:d}, atom = {:d}, dir = {:d}, Fnum = {:.4e} , Fana = {:.4e} --> diff = {:.4e}'.format( m, atom_index, dir_index, fn_ad, fa_ad, diff))
+                        # Debug: print energy values for failing cases
+                        if order == 4:
+                            print(f'  DEBUG: up1={up1[m]:.6e}, um1={um1[m]:.6e}, up2={up2[m]:.6e}, um2={um2[m]:.6e}')
+                            print(f'  DEBUG: (up1-um1)/(2*eps)={(up1[m]-um1[m])/(2*epsilon):.6e}, 4th order={(- up2[m] + 8*up1[m] - 8*um1[m] + um2[m])/(12*epsilon):.6e}')
+                        else:
+                            print(f'  DEBUG: up1={up1[m]:.6e}, um1={um1[m]:.6e}, (up1-um1)/(2*eps)={(up1[m]-um1[m])/(2*epsilon):.6e}')
+                        # Debug: print interactions involving this atom
+                        idx = list(self.data.index)[m]
+                        inters = self.data.loc[idx, 'interactions']
+                        print(f'  DEBUG: Interaction types for data point {m}: {list(inters.keys())}')
             dmax = np.max(differences)
             dmean = np.mean(differences)
             print('random try {:d} --> max diff = {:4.3e}, mean diff = {:4.3e}'.format(random_try,dmax,dmean))
