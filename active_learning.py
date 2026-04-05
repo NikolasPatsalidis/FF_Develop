@@ -122,8 +122,8 @@ class ActiveLearningConfig(ConfigBase):
         'mass_map': '',
         # MC sampling parameters
         'max_mc_steps': 4000,                # maximum MC steps per system
-        'max_candidates_per_system': 10000,   # maximum candidate configs per system
-        'number_of_data_per_step': 100,      # data points to collect per step
+        'max_mc_candidates': 10000,   # maximum candidate configs per system
+        'mc_initial_configs': 100,      # data points to collect per step
         'translate_atoms': 0.2,               # probability to translate single atom
         'rotate_whole': 0.5,                  # probability to rotate whole choose_from set
         'translate_whole': 0.3,               # probability to translate whole choose_from set
@@ -1565,7 +1565,6 @@ class LangevinDynamics:
         
         print(f"Validating analytical vs numerical forces on {len(mobile_atom_indices)} mobile atoms... mobile indices = {mobile_atom_indices}")
         print(f'{"-"*20}')
-        
         _, max_diff = self.optimizer.test_ForceClass(which='opt', epsilon=1e-5, verbose=True, 
                                                       random_tries=3, order=4,
                                                       mobile_atoms=mobile_atom_indices)
@@ -1575,7 +1574,7 @@ class LangevinDynamics:
                                                       random_tries=3, order=4,
                                                       mobile_atoms=mobile_atom_indices)
             if max_diff > force_tol:                                
-                raise RuntimeError(f"Force validation FAILED! max_diff={max_diff:.4e} > tol={force_tol:.4e}. "
+                raise RuntimeError(f"Force validation FAILED TWICE! max_diff={max_diff:.4e} > tol={force_tol:.4e}. "
                              f"Analytical forces do not match numerical gradients of U.")
         
         print(f'{"-"*60}')
