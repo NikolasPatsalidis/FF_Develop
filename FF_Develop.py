@@ -10050,6 +10050,7 @@ class FF_Optimizer(Optimizer):
                 t = 0  # timestep
                 epoch = 0
                 
+                log_every=10
                 while epoch < maxiter:
                     # Shuffle batch order at each epoch
                     batch_order = np.random.permutation(n_batches)
@@ -10088,7 +10089,7 @@ class FF_Optimizer(Optimizer):
                         best_cost = cost
                         best_params = params.copy()
                     
-                    if epoch % 1 == 0:
+                    if epoch % log_every or epoch < log_every == 0:
                         print(f'Adam Epoch {epoch}, Cost = {cost:.6e}')
                         sys.stdout.flush()
                     
