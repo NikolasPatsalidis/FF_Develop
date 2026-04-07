@@ -3007,19 +3007,19 @@ class al_help():
         return data.loc[keep_index]
 
     @staticmethod
-    def clean_data(data,setup,beta_sampling=1.0, prefix=''):
+    def clean_data(data, bC, beta_sampling=1.0, prefix=''):
         """Stochastically downsample high-energy configurations.
 
         For each system, each row is kept with probability
-        `exp(-|E - Emin(sys)| / setup.bC)`. Small datasets (<= 200 rows)
+        `exp(-|E - Emin(sys)| / bC)`. Small datasets (<= 200 rows)
         are kept in full.
 
         Parameters
         ----------
         data : pandas.DataFrame
             Dataset containing `sys_name` and `Energy`.
-        setup : Setup_Interfacial_Optimization
-            Provides `bC` (energy range scale).
+        bC : float
+            Energy range scale (kcal/mol) for Boltzmann downsampling.
         prefix : str
             Label used for printing.
 
@@ -3039,7 +3039,7 @@ class al_help():
         for i in range(n):
             mineners[i] = me[ sysnames[i] ]
         
-        e_range = setup.bC
+        e_range = bC
         re = np.abs(mineners - ener) - e_range
         pe = np.exp(-re / beta_sampling)
         if n > 200:

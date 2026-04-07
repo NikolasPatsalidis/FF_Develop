@@ -135,6 +135,7 @@ class ActiveLearningConfig(ConfigBase):
         'forbidden_separation': 6.0,          # Å - cutoff for detecting disconnected clusters
         'max_ener' : 50,                      # maximum energy to keep the data in kcal/mol
         'max_force': 70.0,                    # maximum force magnitude to keep data in kcal/mol/Å
+        'bC': 50.0,                           # kcal/mol - energy range scale for Boltzmann downsampling
         # Langevin MD sampling parameters
         'md_initial_configs': 10,             # number of initial configs to start MD from
         'md_friction': 0.01,                  # friction coefficient (1/fs)
@@ -579,8 +580,8 @@ class ActiveLearningPipeline:
         # Step 2: Clean well-separated structures (disconnected clusters)
         data = self.al.clean_well_separated_nanostructures(data, self.al_config.forbidden_separation)
         
-        # Step 3: Standard FF cleaning
-        data = self.al.clean_data(data, self.setup, self.beta_sampling)
+        # Step 3: Standard FF cleaning (Boltzmann downsampling)
+        data = self.al.clean_data(data, self.al_config.bC, self.beta_sampling)
         print('After FF cleaning:')
         self._print_column_stats(data['Energy'])
         
