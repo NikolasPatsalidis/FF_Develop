@@ -10340,7 +10340,7 @@ class FF_Optimizer(Optimizer):
                         best_cost = cost
                         best_params = params.copy()
                     
-                    if epoch % log_every or epoch < log_every == 0:
+                    if epoch % log_every== 0 or epoch < log_every:
                         print(f'Adam Epoch {epoch}, Cost = {cost:.6e}')
                         sys.stdout.flush()
                     
