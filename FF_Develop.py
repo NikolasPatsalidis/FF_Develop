@@ -616,8 +616,8 @@ class al_help():
         """
         
         max_mc_steps = al_config.max_mc_steps
-        max_candidates_per_system = al_config.max_candidates_per_system
-        number_of_data_per_step = al_config.number_of_data_per_step   
+        max_mc_candidates = al_config.max_mc_candidates
+        mc_initial_configs = al_config.mc_initial_configs   
         asymptotic_steps = al_config.mc_asymptotic_steps
         fixed_types = al_config.fixed_types
         pta, ptwh, prwh = al_config.translate_atoms, al_config.translate_whole, al_config.rotate_whole
@@ -661,11 +661,11 @@ class al_help():
 
             all_indexes = np.array(step_data.index)
             try:
-                idx_chosen = np.random.choice(all_indexes, size= min(len(step_data) , number_of_data_per_step) , replace=False, p = prop_sel)
+                idx_chosen = np.random.choice(all_indexes, size= min(len(step_data) , mc_initial_configs) , replace=False, p = prop_sel)
             except ValueError:
-                idx_chosen = np.random.choice(all_indexes, size= min(len(step_data) , number_of_data_per_step) , replace=False, p = None)
+                idx_chosen = np.random.choice(all_indexes, size= min(len(step_data) , mc_initial_configs) , replace=False, p = None)
             
-            # select a subset of initial data (number_of_data_per_step)
+            # select a subset of initial data (mc_initial_configs)
             step_data = step_data.loc[idx_chosen]
             
             # evaluate previouss step
@@ -680,7 +680,7 @@ class al_help():
             
             candidate_data_sys = pd.DataFrame()
 
-            while(step <= max_mc_steps and c_size <= max_candidates_per_system):
+            while(step <= max_mc_steps and c_size <= max_mc_candidates):
                 # get new corods via random walk
                 old_coords = copy.deepcopy(step_data['coords'].to_numpy().copy())
                 all_new_coords = al_help.random_walk_multiple(old_coords, sigma, at_types, fixed_types,
@@ -3007,19 +3007,19 @@ class al_help():
         return data.loc[keep_index]
 
     @staticmethod
-    def clean_data(data,setup,beta_sampling=1.0, prefix=''):
+    def clean_data(data, bC, beta_sampling=1.0, prefix=''):
         """Stochastically downsample high-energy configurations.
 
         For each system, each row is kept with probability
-        `exp(-|E - Emin(sys)| / setup.bC)`. Small datasets (<= 200 rows)
+        `exp(-|E - Emin(sys)| / bC)`. Small datasets (<= 200 rows)
         are kept in full.
 
         Parameters
         ----------
         data : pandas.DataFrame
             Dataset containing `sys_name` and `Energy`.
-        setup : Setup_Interfacial_Optimization
-            Provides `bC` (energy range scale).
+        bC : float
+            Energy range scale (kcal/mol) for Boltzmann downsampling.
         prefix : str
             Label used for printing.
 
@@ -3039,7 +3039,7 @@ class al_help():
         for i in range(n):
             mineners[i] = me[ sysnames[i] ]
         
-        e_range = setup.bC
+        e_range = bC
         re = np.abs(mineners - ener) - e_range
         pe = np.exp(-re / beta_sampling)
         if n > 200:
@@ -3183,6 +3183,379 @@ class GeneralFunctions:
         return colors
     
     
+# =========== NJIT BATCH FUNCTIONS FOR DESCRIPTOR CALCULATIONS ===========
+
+@njit(fastmath=True, cache=True)
+def _apply_mic_batch_njit(diff, lattice, inv_lattice):
+    """Apply MIC to batch of displacement vectors (njit version)."""
+    N = diff.shape[0]
+    result = np.empty((N, 3), dtype=np.float64)
+    for i in range(N):
+        # Convert to fractional
+        s = np.zeros(3)
+        for j in range(3):
+            s[j] = diff[i, 0] * inv_lattice[0, j] + diff[i, 1] * inv_lattice[1, j] + diff[i, 2] * inv_lattice[2, j]
+        # Wrap to [-0.5, 0.5)
+        for j in range(3):
+            s[j] = s[j] - np.floor(s[j] + 0.5)
+        # Convert back to Cartesian
+        for j in range(3):
+            result[i, j] = s[0] * lattice[0, j] + s[1] * lattice[1, j] + s[2] * lattice[2, j]
+    return result
+
+@njit(fastmath=True, cache=True)
+def _calc_bonds_batch_njit(coords, i_indices, j_indices, use_mic, lattice, inv_lattice):
+    """Compute distances and unit vectors for batch of pairs (njit version)."""
+    N = len(i_indices)
+    r = np.empty(N, dtype=np.float64)
+    partial_ri = np.empty((N, 3), dtype=np.float64)
+    
+    for idx in range(N):
+        i = i_indices[idx]
+        j = j_indices[idx]
+        diff = np.array([coords[i, 0] - coords[j, 0], 
+                         coords[i, 1] - coords[j, 1], 
+                         coords[i, 2] - coords[j, 2]])
+        
+        if use_mic:
+            # Apply MIC inline
+            s = np.zeros(3)
+            for k in range(3):
+                s[k] = diff[0] * inv_lattice[0, k] + diff[1] * inv_lattice[1, k] + diff[2] * inv_lattice[2, k]
+            for k in range(3):
+                s[k] = s[k] - np.floor(s[k] + 0.5)
+            for k in range(3):
+                diff[k] = s[0] * lattice[0, k] + s[1] * lattice[1, k] + s[2] * lattice[2, k]
+        
+        dist = np.sqrt(diff[0]**2 + diff[1]**2 + diff[2]**2)
+        r[idx] = dist
+        partial_ri[idx, 0] = diff[0] / dist
+        partial_ri[idx, 1] = diff[1] / dist
+        partial_ri[idx, 2] = diff[2] / dist
+    
+    return r, partial_ri
+
+@njit(fastmath=True, cache=True)
+def _calc_angles_batch_njit(coords, i_indices, j_indices, k_indices, use_mic, lattice, inv_lattice):
+    """Compute angles and partial derivatives for batch of angle triples (njit version)."""
+    N = len(i_indices)
+    angles = np.empty(N, dtype=np.float64)
+    pa = np.empty((N, 3), dtype=np.float64)
+    pc = np.empty((N, 3), dtype=np.float64)
+    
+    for idx in range(N):
+        i = i_indices[idx]
+        j = j_indices[idx]
+        k = k_indices[idx]
+        
+        vij = np.array([coords[i, 0] - coords[j, 0],
+                        coords[i, 1] - coords[j, 1],
+                        coords[i, 2] - coords[j, 2]])
+        vkj = np.array([coords[k, 0] - coords[j, 0],
+                        coords[k, 1] - coords[j, 1],
+                        coords[k, 2] - coords[j, 2]])
+        
+        if use_mic:
+            # Apply MIC to vij
+            s = np.zeros(3)
+            for m in range(3):
+                s[m] = vij[0] * inv_lattice[0, m] + vij[1] * inv_lattice[1, m] + vij[2] * inv_lattice[2, m]
+            for m in range(3):
+                s[m] = s[m] - np.floor(s[m] + 0.5)
+            for m in range(3):
+                vij[m] = s[0] * lattice[0, m] + s[1] * lattice[1, m] + s[2] * lattice[2, m]
+            # Apply MIC to vkj
+            for m in range(3):
+                s[m] = vkj[0] * inv_lattice[0, m] + vkj[1] * inv_lattice[1, m] + vkj[2] * inv_lattice[2, m]
+            for m in range(3):
+                s[m] = s[m] - np.floor(s[m] + 0.5)
+            for m in range(3):
+                vkj[m] = s[0] * lattice[0, m] + s[1] * lattice[1, m] + s[2] * lattice[2, m]
+        
+        # Dot products and norms
+        a = vij[0] * vkj[0] + vij[1] * vkj[1] + vij[2] * vkj[2]
+        b = np.sqrt(vij[0]**2 + vij[1]**2 + vij[2]**2)
+        c = np.sqrt(vkj[0]**2 + vkj[1]**2 + vkj[2]**2)
+        bc = b * c
+        
+        # Partial derivatives
+        for m in range(3):
+            pa[idx, m] = vkj[m] / bc - a * vij[m] / (c * b**3)
+            pc[idx, m] = vij[m] / bc - a * vkj[m] / (b * c**3)
+        
+        # Angle
+        cth = a / bc
+        if cth > 1.0:
+            cth = 1.0
+        elif cth < -1.0:
+            cth = -1.0
+        angle = np.arccos(cth)
+        angles[idx] = angle
+        
+        # Chain rule
+        sin_th = np.sin(angle)
+        if sin_th < 1.49e-8:
+            sin_th = 1.49e-8
+        dth_dcth = -1.0 / sin_th
+        
+        for m in range(3):
+            pa[idx, m] *= dth_dcth
+            pc[idx, m] *= dth_dcth
+    
+    return angles, pa, pc
+
+@njit(fastmath=True, cache=True, parallel=True)
+def _calc_dihedrals_batch_njit(coords, i_indices, j_indices, k_indices, l_indices, use_mic, lattice, inv_lattice):
+    """Compute dihedral angles and gradients for batch of quadruplets (njit version)."""
+    N = len(i_indices)
+    dihedrals = np.empty(N, dtype=np.float64)
+    dri = np.empty((N, 3), dtype=np.float64)
+    drj = np.empty((N, 3), dtype=np.float64)
+    drk = np.empty((N, 3), dtype=np.float64)
+    drl = np.empty((N, 3), dtype=np.float64)
+    
+    for idx in prange(N):
+        i = i_indices[idx]
+        j = j_indices[idx]
+        k = k_indices[idx]
+        l = l_indices[idx]
+        
+        # Bond vectors
+        b1 = np.array([coords[j, 0] - coords[i, 0],
+                       coords[j, 1] - coords[i, 1],
+                       coords[j, 2] - coords[i, 2]])
+        b2 = np.array([coords[k, 0] - coords[j, 0],
+                       coords[k, 1] - coords[j, 1],
+                       coords[k, 2] - coords[j, 2]])
+        b3 = np.array([coords[l, 0] - coords[k, 0],
+                       coords[l, 1] - coords[k, 1],
+                       coords[l, 2] - coords[k, 2]])
+        
+        if use_mic:
+            # Apply MIC to b1
+            s = np.zeros(3)
+            for m in range(3):
+                s[m] = b1[0] * inv_lattice[0, m] + b1[1] * inv_lattice[1, m] + b1[2] * inv_lattice[2, m]
+            for m in range(3):
+                s[m] = s[m] - np.floor(s[m] + 0.5)
+            for m in range(3):
+                b1[m] = s[0] * lattice[0, m] + s[1] * lattice[1, m] + s[2] * lattice[2, m]
+            # Apply MIC to b2
+            for m in range(3):
+                s[m] = b2[0] * inv_lattice[0, m] + b2[1] * inv_lattice[1, m] + b2[2] * inv_lattice[2, m]
+            for m in range(3):
+                s[m] = s[m] - np.floor(s[m] + 0.5)
+            for m in range(3):
+                b2[m] = s[0] * lattice[0, m] + s[1] * lattice[1, m] + s[2] * lattice[2, m]
+            # Apply MIC to b3
+            for m in range(3):
+                s[m] = b3[0] * inv_lattice[0, m] + b3[1] * inv_lattice[1, m] + b3[2] * inv_lattice[2, m]
+            for m in range(3):
+                s[m] = s[m] - np.floor(s[m] + 0.5)
+            for m in range(3):
+                b3[m] = s[0] * lattice[0, m] + s[1] * lattice[1, m] + s[2] * lattice[2, m]
+        
+        # Normal vectors: n1 = b1 x b2, n2 = b2 x b3
+        n1 = np.array([b1[1]*b2[2] - b1[2]*b2[1],
+                       b1[2]*b2[0] - b1[0]*b2[2],
+                       b1[0]*b2[1] - b1[1]*b2[0]])
+        n2 = np.array([b2[1]*b3[2] - b2[2]*b3[1],
+                       b2[2]*b3[0] - b2[0]*b3[2],
+                       b2[0]*b3[1] - b2[1]*b3[0]])
+        
+        # Normalized b2
+        b2_norm = np.sqrt(b2[0]**2 + b2[1]**2 + b2[2]**2)
+        if b2_norm < 1e-10:
+            b2_norm = 1e-10
+        nb2 = b2 / b2_norm
+        
+        # m1 = n1 x nb2
+        m1 = np.array([n1[1]*nb2[2] - n1[2]*nb2[1],
+                       n1[2]*nb2[0] - n1[0]*nb2[2],
+                       n1[0]*nb2[1] - n1[1]*nb2[0]])
+        
+        # x = n1 . n2, y = m1 . n2
+        x = n1[0]*n2[0] + n1[1]*n2[1] + n1[2]*n2[2]
+        y = m1[0]*n2[0] + m1[1]*n2[1] + m1[2]*n2[2]
+        
+        # Dihedral angle
+        dihedrals[idx] = np.arctan2(y, x)
+        
+        # Gradient computation (inlined from _calc_dihedral_grad_from_bonds)
+        denom = x**2 + y**2
+        if denom < 1e-20:
+            dri[idx, 0] = 0.0; dri[idx, 1] = 0.0; dri[idx, 2] = 0.0
+            drj[idx, 0] = 0.0; drj[idx, 1] = 0.0; drj[idx, 2] = 0.0
+            drk[idx, 0] = 0.0; drk[idx, 1] = 0.0; drk[idx, 2] = 0.0
+            drl[idx, 0] = 0.0; drl[idx, 1] = 0.0; drl[idx, 2] = 0.0
+            continue
+            
+        dwdx = -y / denom
+        dwdy = x / denom
+        
+        # Skew-symmetric matrices for cross product derivatives
+        # dn1/db1 = skew(b2), dn1/db2 = -skew(b1)
+        # dn2/db2 = skew(b3), dn2/db3 = -skew(b2)
+        
+        # dm1/dn1 = skew(nb2), dm1/dnb2 = -skew(n1)
+        # dnb2/db2 = (I - nb2*nb2^T)/|b2|
+        
+        # dwdri = dwdb1 * db1dri where db1dri = -I
+        # dwdn1 = dwdx * n2 + dwdy * (dm1/dn1)^T * n2
+        
+        # Compute dm1dn1 @ n2 (dm1/dn1 = skew(nb2))
+        dm1dn1_n2 = np.array([nb2[1]*n2[2] - nb2[2]*n2[1],
+                              nb2[2]*n2[0] - nb2[0]*n2[2],
+                              nb2[0]*n2[1] - nb2[1]*n2[0]])
+        
+        dwdn1 = dwdx * n2 + dwdy * dm1dn1_n2
+        
+        # dn1db1 = skew(b2), so dwdb1 = dwdn1 @ skew(b2)
+        # skew(b2) @ dwdn1 = b2 x dwdn1
+        dwdb1 = np.array([b2[1]*dwdn1[2] - b2[2]*dwdn1[1],
+                          b2[2]*dwdn1[0] - b2[0]*dwdn1[2],
+                          b2[0]*dwdn1[1] - b2[1]*dwdn1[0]])
+        
+        # grad[0] = dwdb1 * (-1)
+        dri[idx, 0] = -dwdb1[0]
+        dri[idx, 1] = -dwdb1[1]
+        dri[idx, 2] = -dwdb1[2]
+        
+        # For drj: T1 = dwdb1 * 1
+        T1 = dwdb1.copy()
+        
+        # dn1db2 = -skew(b1), T21 = dwdn1 @ (-skew(b1)) = -dwdn1 x b1 = b1 x dwdn1
+        T21 = np.array([b1[1]*dwdn1[2] - b1[2]*dwdn1[1],
+                        b1[2]*dwdn1[0] - b1[0]*dwdn1[2],
+                        b1[0]*dwdn1[1] - b1[1]*dwdn1[0]])
+        T21 = -T21  # because dn1db2 = -skew(b1)
+        
+        # dwdn2 = dwdx * n1 + dwdy * m1
+        dwdn2 = dwdx * n1 + dwdy * m1
+        
+        # dn2db2 = skew(b3), T22 = dwdn2 @ skew(b3) = b3 x dwdn2
+        T22 = np.array([b3[1]*dwdn2[2] - b3[2]*dwdn2[1],
+                        b3[2]*dwdn2[0] - b3[0]*dwdn2[2],
+                        b3[0]*dwdn2[1] - b3[1]*dwdn2[0]])
+        
+        # dm1dnb2 = -skew(n1), dwdnb2 = dwdy * n2 @ (-skew(n1)) = -dwdy * (n1 x n2)
+        n1_cross_n2 = np.array([n1[1]*n2[2] - n1[2]*n2[1],
+                                n1[2]*n2[0] - n1[0]*n2[2],
+                                n1[0]*n2[1] - n1[1]*n2[0]])
+        dwdnb2 = -dwdy * n1_cross_n2
+        
+        # dnb2db2 = (I - nb2*nb2^T)/|b2|
+        # T23 = dwdnb2 @ dnb2db2 = (dwdnb2 - (dwdnb2.nb2)*nb2) / |b2|
+        dot_dwdnb2_nb2 = dwdnb2[0]*nb2[0] + dwdnb2[1]*nb2[1] + dwdnb2[2]*nb2[2]
+        T23 = (dwdnb2 - dot_dwdnb2_nb2 * nb2) / b2_norm
+        
+        dwdb2 = T21 + T22 + T23
+        
+        # grad[1] = T1 + dwdb2 * (-1)
+        drj[idx, 0] = T1[0] - dwdb2[0]
+        drj[idx, 1] = T1[1] - dwdb2[1]
+        drj[idx, 2] = T1[2] - dwdb2[2]
+        
+        # For drk: dwdb2 * 1 + dwdb3 * (-1)
+        # dn2db3 = -skew(b2), dwdb3 = dwdn2 @ (-skew(b2)) = -b2 x dwdn2
+        dwdb3 = np.array([b2[1]*dwdn2[2] - b2[2]*dwdn2[1],
+                          b2[2]*dwdn2[0] - b2[0]*dwdn2[2],
+                          b2[0]*dwdn2[1] - b2[1]*dwdn2[0]])
+        dwdb3 = -dwdb3
+        
+        drk[idx, 0] = dwdb2[0] - dwdb3[0]
+        drk[idx, 1] = dwdb2[1] - dwdb3[1]
+        drk[idx, 2] = dwdb2[2] - dwdb3[2]
+        
+        # For drl: dwdb3 * 1
+        drl[idx, 0] = dwdb3[0]
+        drl[idx, 1] = dwdb3[1]
+        drl[idx, 2] = dwdb3[2]
+    
+    return dihedrals, dri, drj, drk, drl
+
+@njit(fastmath=True, cache=True, parallel=True)
+def _calc_rhos_batch_njit(coords, all_i_indices, all_j_indices, pair_starts, pair_ends, 
+                          c, r0, rc, use_mic, lattice, inv_lattice):
+    """Compute rho values and gradients for batch of central atoms (njit version).
+    
+    Parameters
+    ----------
+    coords : (natoms, 3) array
+    all_i_indices, all_j_indices : (total_pairs,) arrays of atom indices for all pairs
+    pair_starts, pair_ends : (n_central,) arrays marking start/end of pairs for each central atom
+    c : (4,) polynomial coefficients
+    r0, rc : cutoff parameters
+    use_mic : bool
+    lattice, inv_lattice : (3, 3) arrays
+    
+    Returns
+    -------
+    rhos : (n_central,) rho values
+    v_ij : (total_pairs, 3) gradient vectors
+    """
+    n_central = len(pair_starts)
+    total_pairs = len(all_i_indices)
+    
+    rhos = np.empty(n_central, dtype=np.float64)
+    v_ij = np.empty((total_pairs, 3), dtype=np.float64)
+    
+    for iv in prange(n_central):
+        rho = 0.0
+        start = pair_starts[iv]
+        end = pair_ends[iv]
+        
+        for p in range(start, end):
+            i = all_i_indices[p]
+            j = all_j_indices[p]
+            
+            diff = np.array([coords[i, 0] - coords[j, 0],
+                             coords[i, 1] - coords[j, 1],
+                             coords[i, 2] - coords[j, 2]])
+            
+            if use_mic:
+                s = np.zeros(3)
+                for m in range(3):
+                    s[m] = diff[0] * inv_lattice[0, m] + diff[1] * inv_lattice[1, m] + diff[2] * inv_lattice[2, m]
+                for m in range(3):
+                    s[m] = s[m] - np.floor(s[m] + 0.5)
+                for m in range(3):
+                    diff[m] = s[0] * lattice[0, m] + s[1] * lattice[1, m] + s[2] * lattice[2, m]
+            
+            r = np.sqrt(diff[0]**2 + diff[1]**2 + diff[2]**2)
+            
+            # phi_rho
+            if r <= r0:
+                phi = 1.0
+            elif r >= rc:
+                phi = 0.0
+            else:
+                phi = c[0] + c[1]*r**2 + c[2]*r**4 + c[3]*r**6
+            
+            rho += phi
+            
+            # dphi_rho * unit_vector
+            if r <= r0:
+                dphi = 0.0
+            elif r >= rc:
+                dphi = 0.0
+            else:
+                dphi = 2*c[1]*r + 4*c[2]*r**3 + 6*c[3]*r**5
+            
+            if r > 1e-10:
+                v_ij[p, 0] = dphi * diff[0] / r
+                v_ij[p, 1] = dphi * diff[1] / r
+                v_ij[p, 2] = dphi * diff[2] / r
+            else:
+                v_ij[p, 0] = 0.0
+                v_ij[p, 1] = 0.0
+                v_ij[p, 2] = 0.0
+        
+        rhos[iv] = rho
+    
+    return rhos, v_ij
+
+
 class VectorGeometry:
     """Numba-accelerated vector geometry utilities for molecular calculations."""
     
@@ -3296,12 +3669,10 @@ class VectorGeometry:
         numpy.ndarray
             (N, 3) MIC-corrected displacement vectors.
         """
-        # Convert to fractional coordinates: s = diff @ inv_lattice
-        s = np.dot(diff, inv_lattice)
-        # Wrap to [-0.5, 0.5)
-        s = s - np.floor(s + 0.5)
-        # Convert back to Cartesian
-        return np.dot(s, lattice)
+        diff = np.ascontiguousarray(diff, dtype=np.float64)
+        lattice = np.ascontiguousarray(lattice, dtype=np.float64)
+        inv_lattice = np.ascontiguousarray(inv_lattice, dtype=np.float64)
+        return _apply_mic_batch_njit(diff, lattice, inv_lattice)
     
     @staticmethod
     def calc_bonds_batch(coords, i_indices, j_indices, lattice=None, inv_lattice=None):
@@ -3323,18 +3694,20 @@ class VectorGeometry:
         partial_ri : numpy.ndarray
             (N, 3) unit vectors from j to i.
         """
-        coords = np.asarray(coords, dtype=float)  # Handle list input
-        ri = coords[i_indices]  # (N, 3)
-        rj = coords[j_indices]  # (N, 3)
-        diff = ri - rj  # (N, 3)
+        coords = np.ascontiguousarray(coords, dtype=np.float64)
+        i_indices = np.ascontiguousarray(i_indices, dtype=np.int64)
+        j_indices = np.ascontiguousarray(j_indices, dtype=np.int64)
         
-        if lattice is not None:
-            diff = VectorGeometry.apply_mic_batch(diff, lattice, inv_lattice)
+        use_mic = lattice is not None
+        if use_mic:
+            lattice = np.ascontiguousarray(lattice, dtype=np.float64)
+            inv_lattice = np.ascontiguousarray(inv_lattice, dtype=np.float64)
+        else:
+            # Dummy arrays for njit (won't be used)
+            lattice = np.zeros((3, 3), dtype=np.float64)
+            inv_lattice = np.zeros((3, 3), dtype=np.float64)
         
-        r = np.linalg.norm(diff, axis=1)  # (N,)
-        partial_ri = diff / r[:, np.newaxis]  # (N, 3)
-        
-        return r, partial_ri
+        return _calc_bonds_batch_njit(coords, i_indices, j_indices, use_mic, lattice, inv_lattice)
     
     @staticmethod
     def calc_angles_batch(coords, i_indices, j_indices, k_indices, lattice=None, inv_lattice=None):
@@ -3358,47 +3731,20 @@ class VectorGeometry:
         pc : numpy.ndarray
             (N, 3) partial derivatives w.r.t. position k.
         """
-        coords = np.asarray(coords, dtype=float)
-        ri = coords[i_indices]  # (N, 3)
-        rj = coords[j_indices]  # (N, 3)
-        rk = coords[k_indices]  # (N, 3)
+        coords = np.ascontiguousarray(coords, dtype=np.float64)
+        i_indices = np.ascontiguousarray(i_indices, dtype=np.int64)
+        j_indices = np.ascontiguousarray(j_indices, dtype=np.int64)
+        k_indices = np.ascontiguousarray(k_indices, dtype=np.int64)
         
-        # Bond vectors
-        vij = ri - rj  # (N, 3)
-        vkj = rk - rj  # (N, 3)
+        use_mic = lattice is not None
+        if use_mic:
+            lattice = np.ascontiguousarray(lattice, dtype=np.float64)
+            inv_lattice = np.ascontiguousarray(inv_lattice, dtype=np.float64)
+        else:
+            lattice = np.zeros((3, 3), dtype=np.float64)
+            inv_lattice = np.zeros((3, 3), dtype=np.float64)
         
-        if lattice is not None:
-            vij = VectorGeometry.apply_mic_batch(vij, lattice, inv_lattice)
-            vkj = VectorGeometry.apply_mic_batch(vkj, lattice, inv_lattice)
-        
-        # Dot products and norms
-        a = np.sum(vij * vkj, axis=1)  # (N,) dot product
-        b = np.linalg.norm(vij, axis=1)  # (N,) |vij|
-        c = np.linalg.norm(vkj, axis=1)  # (N,) |vkj|
-        
-        bc = b * c  # (N,)
-        
-        # Partial derivatives of cos(theta) w.r.t. ri and rk
-        # fi = vkj/(b*c) - a*vij/(c*b^3)
-        # fk = vij/(b*c) - a*vkj/(b*c^3)
-        fi = vkj / bc[:, np.newaxis] - a[:, np.newaxis] * vij / (c * b**3)[:, np.newaxis]
-        fk = vij / bc[:, np.newaxis] - a[:, np.newaxis] * vkj / (b * c**3)[:, np.newaxis]
-        
-        # cos(theta) and angle
-        cth = a / bc
-        cth = np.clip(cth, -1.0, 1.0)  # Numerical safety
-        angles = np.arccos(cth)
-        
-        # Chain rule: dtheta/dcth = -1/sin(theta)
-        sin_th = np.sin(angles)
-        sin_th = np.maximum(sin_th, 1.49e-8)  # Avoid division by zero
-        dth_dcth = -1.0 / sin_th
-        
-        # Apply chain rule
-        pa = fi * dth_dcth[:, np.newaxis]
-        pc = fk * dth_dcth[:, np.newaxis]
-        
-        return angles, pa, pc
+        return _calc_angles_batch_njit(coords, i_indices, j_indices, k_indices, use_mic, lattice, inv_lattice)
     
     @staticmethod
     def calc_dihedrals_batch(coords, i_indices, j_indices, k_indices, l_indices, lattice=None, inv_lattice=None):
@@ -3420,57 +3766,88 @@ class VectorGeometry:
         dri, drj, drk, drl : numpy.ndarray
             (N, 3) gradients w.r.t. each atom position.
         """
-        coords = np.asarray(coords, dtype=float)
-        ri = coords[i_indices]  # (N, 3)
-        rj = coords[j_indices]  # (N, 3)
-        rk = coords[k_indices]  # (N, 3)
-        rl = coords[l_indices]  # (N, 3)
+        coords = np.ascontiguousarray(coords, dtype=np.float64)
+        i_indices = np.ascontiguousarray(i_indices, dtype=np.int64)
+        j_indices = np.ascontiguousarray(j_indices, dtype=np.int64)
+        k_indices = np.ascontiguousarray(k_indices, dtype=np.int64)
+        l_indices = np.ascontiguousarray(l_indices, dtype=np.int64)
         
-        # Bond vectors
-        b1 = rj - ri  # (N, 3)
-        b2 = rk - rj  # (N, 3)
-        b3 = rl - rk  # (N, 3)
+        use_mic = lattice is not None
+        if use_mic:
+            lattice = np.ascontiguousarray(lattice, dtype=np.float64)
+            inv_lattice = np.ascontiguousarray(inv_lattice, dtype=np.float64)
+        else:
+            lattice = np.zeros((3, 3), dtype=np.float64)
+            inv_lattice = np.zeros((3, 3), dtype=np.float64)
         
-        if lattice is not None:
-            b1 = VectorGeometry.apply_mic_batch(b1, lattice, inv_lattice)
-            b2 = VectorGeometry.apply_mic_batch(b2, lattice, inv_lattice)
-            b3 = VectorGeometry.apply_mic_batch(b3, lattice, inv_lattice)
+        return _calc_dihedrals_batch_njit(coords, i_indices, j_indices, k_indices, l_indices, 
+                                          use_mic, lattice, inv_lattice)
+    
+    @staticmethod
+    def calc_rhos_batch(coords, pairs_list, c, r0, rc, lattice=None, inv_lattice=None):
+        """Compute rho values and gradients for batch of central atoms.
         
-        # Normal vectors to planes
-        n1 = np.cross(b1, b2)  # (N, 3)
-        n2 = np.cross(b2, b3)  # (N, 3)
+        Parameters
+        ----------
+        coords : numpy.ndarray
+            (natoms, 3) coordinate array.
+        pairs_list : list of lists
+            List where pairs_list[iv] contains pairs (i,j) for central atom iv.
+        c : numpy.ndarray
+            (4,) polynomial coefficients.
+        r0, rc : float
+            Cutoff parameters.
+        lattice, inv_lattice : numpy.ndarray or None
+            Lattice matrices for MIC, or None for non-periodic.
+            
+        Returns
+        -------
+        rhos : (n_central,) rho values
+        v_ij : (total_pairs, 3) gradient vectors
+        i_index, j_index : (total_pairs,) atom indices
+        to_pair_index : (total_pairs,) mapping to central atom
+        """
+        coords = np.ascontiguousarray(coords, dtype=np.float64)
+        c = np.ascontiguousarray(c, dtype=np.float64)
         
-        # Normalized b2
-        b2_norm = np.linalg.norm(b2, axis=1, keepdims=True)
-        nb2 = b2 / np.maximum(b2_norm, 1e-10)  # (N, 3)
+        n_central = len(pairs_list)
         
-        # m1 = n1 x nb2
-        m1 = np.cross(n1, nb2)  # (N, 3)
+        # Flatten pairs into arrays
+        all_i = []
+        all_j = []
+        pair_starts = []
+        pair_ends = []
+        to_pair_index = []
         
-        # x = n1 . n2, y = m1 . n2
-        x = np.sum(n1 * n2, axis=1)  # (N,)
-        y = np.sum(m1 * n2, axis=1)  # (N,)
+        current_pos = 0
+        for iv, pairs in enumerate(pairs_list):
+            pair_starts.append(current_pos)
+            for (i, j) in pairs:
+                all_i.append(i)
+                all_j.append(j)
+                to_pair_index.append(iv)
+            current_pos += len(pairs)
+            pair_ends.append(current_pos)
         
-        # Dihedral angle
-        dihedrals = np.arctan2(y, x)  # (N,)
+        all_i_indices = np.ascontiguousarray(all_i, dtype=np.int64)
+        all_j_indices = np.ascontiguousarray(all_j, dtype=np.int64)
+        pair_starts = np.ascontiguousarray(pair_starts, dtype=np.int64)
+        pair_ends = np.ascontiguousarray(pair_ends, dtype=np.int64)
+        to_pair_index = np.ascontiguousarray(to_pair_index, dtype=np.int64)
         
-        # Gradients - computed per dihedral (vectorization of gradient is complex)
-        N = len(i_indices)
-        dri = np.empty((N, 3), dtype=float)
-        drj = np.empty((N, 3), dtype=float)
-        drk = np.empty((N, 3), dtype=float)
-        drl = np.empty((N, 3), dtype=float)
+        use_mic = lattice is not None
+        if use_mic:
+            lattice = np.ascontiguousarray(lattice, dtype=np.float64)
+            inv_lattice = np.ascontiguousarray(inv_lattice, dtype=np.float64)
+        else:
+            lattice = np.zeros((3, 3), dtype=np.float64)
+            inv_lattice = np.zeros((3, 3), dtype=np.float64)
         
-        for ip in range(N):
-            grad = VectorGeometry._calc_dihedral_grad_from_bonds(
-                b1[ip], b2[ip], b3[ip], n1[ip], n2[ip], nb2[ip], m1[ip], x[ip], y[ip]
-            )
-            dri[ip] = grad[0]
-            drj[ip] = grad[1]
-            drk[ip] = grad[2]
-            drl[ip] = grad[3]
+        rhos, v_ij = _calc_rhos_batch_njit(coords, all_i_indices, all_j_indices, 
+                                           pair_starts, pair_ends, c, r0, rc, 
+                                           use_mic, lattice, inv_lattice)
         
-        return dihedrals, dri, drj, drk, drl
+        return rhos, v_ij, all_i_indices, all_j_indices, to_pair_index
     
     @staticmethod
     def _calc_dihedral_grad_from_bonds(b1, b2, b3, n1, n2, nb2, m1, x, y):
@@ -7135,47 +7512,16 @@ class Interactions():
                     elif intertype=='rhos':
                         r0 = self.rho_r0
                         rc = self.rho_rc
-                        
-                        n_rhos = len(pairs) 
-                        
-                        rhos  = np.empty(n_rhos, dtype=float)
-                        
-                        npairs = np.sum([len(v) for v in pairs])
-                        
-                        v_ij = np.empty( (npairs,3), dtype=float)
-                        
-                        i_index = np.empty(npairs,dtype=int)
-                        j_index = np.empty(npairs,dtype=int)
-                        to_pair_index = np.empty(npairs,dtype=int)
-                        
                         c = self.compute_coeff(r0, rc)
                         
-                        tot_iter = 0
-                        for iv in range(n_rhos):
-                            rho = 0
-                            for ip,p in enumerate(pairs[iv]):
-                                i,j  = p 
-                                r1 = np.array(ac[i]) 
-                                r2 = np.array(ac[j])
-                                
-                                i_index[tot_iter] = i
-                                j_index[tot_iter] = j
-                                to_pair_index[tot_iter] = iv
-                                
-                                if use_mic:
-                                    r12 = VectorGeometry.calc_dist_mic(r1, r2, lattice, inv_lattice)
-                                    dirvec = self.dphi_rho(r12, c, r0, rc) * VectorGeometry.calc_unitvec_mic(r1, r2, lattice, inv_lattice)
-                                else:
-                                    r12 = VectorGeometry.calc_dist(r1, r2)
-                                    dirvec = self.dphi_rho(r12, c, r0, rc) * VectorGeometry.calc_unitvec(r1, r2)
-                                v_ij[tot_iter] = dirvec
-                                
-                                rho += self.phi_rho(r12,c,r0,rc)
-
-                                tot_iter+=1
-                                
-                            rhos[iv] = rho
-                        temp = {'values':rhos,'n_central':n_rhos , 
+                        # Vectorized rhos calculation
+                        rhos, v_ij, i_index, j_index, to_pair_index = VectorGeometry.calc_rhos_batch(
+                            ac, pairs, c, r0, rc,
+                            lattice if use_mic else None,
+                            inv_lattice if use_mic else None
+                        )
+                        
+                        temp = {'values':rhos,'n_central':len(pairs), 
                                 'v_ij':v_ij,'to_pair_index':to_pair_index,
                                 'i_index':i_index,'j_index':j_index}
                     else:
@@ -7245,9 +7591,6 @@ class Interactions():
                 for t in serial_inter.keys():
                     serial_data = serial_inter[t]
                     vec_data = vec_inter[t]
-                    
-                    print( f' Cheking {intertype}, type {t}' )
-                    sys.stdout.flush()
                     
                     for key in serial_data.keys():
                         s_val = np.array(serial_data[key])
@@ -9958,6 +10301,7 @@ class FF_Optimizer(Optimizer):
                 t = 0  # timestep
                 epoch = 0
                 
+                log_every=10
                 while epoch < maxiter:
                     # Shuffle batch order at each epoch
                     batch_order = np.random.permutation(n_batches)
@@ -9996,7 +10340,7 @@ class FF_Optimizer(Optimizer):
                         best_cost = cost
                         best_params = params.copy()
                     
-                    if epoch % 1 == 0:
+                    if epoch % log_every== 0 or epoch < log_every:
                         print(f'Adam Epoch {epoch}, Cost = {cost:.6e}')
                         sys.stdout.flush()
                     
