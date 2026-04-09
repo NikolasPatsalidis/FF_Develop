@@ -10433,7 +10433,7 @@ class FF_Optimizer(Optimizer):
                             sys.stdout.flush()
                     
                     if epoch % log_every == 0 or epoch < log_every:
-                        print(f'Adam Epoch {epoch}, Train Cost = {train_cost:.6e}, Dev Cost = {dev_cost:.6e}')
+                        print(f'Adam Epoch {epoch}, Train Cost = {train_cost:.6e}, Dev Cost = {dev_cost:.6e}, LR = {lr:.4e}')
                         sys.stdout.flush()
                     
                     epoch += 1
