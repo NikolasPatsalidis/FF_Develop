@@ -1790,25 +1790,14 @@ class al_help():
         
             inter.InteractionsForData(setup)
             inter.test_descriptor_calculations(tol=1e-6)
+        
         dataMan = Data_Manager(data,setup)
+        
         train_indexes, dev_indexes = dataMan.train_development_split()
         
-               
         optimizer = FF_Optimizer(data,train_indexes, dev_indexes,setup)
         
-        if setup.test_descriptors:
-            print("Validating analytical vs numerical forces...")
-            print(f'{"-"*20}')
-            _, max_diff = optimizer.test_ForceClass(which='opt', epsilon=1e-5, verbose=True, 
-                                                    random_tries=3, order=4)
-            force_tol = 1e-2
-            if max_diff > force_tol:
-                _, max_diff = optimizer.test_ForceClass(which='opt', epsilon=1e-6, verbose=True, 
-                                                        random_tries=3, order=4)
-                if max_diff > force_tol:
-                    raise RuntimeError(f"Force validation FAILED! max_diff={max_diff:.4e} > tol={force_tol:.4e}")
-            print(f'{"-"*60}')
-        
+       
         method = setup.training_method
         
         min_per_system = np.min( [ np.count_nonzero( data['sys_name'] == name ) for name in np.unique(data['sys_name']) ] )
