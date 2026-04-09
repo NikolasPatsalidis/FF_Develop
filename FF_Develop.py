@@ -10304,6 +10304,7 @@ class FF_Optimizer(Optimizer):
                 tmethod = perf_counter()
                 
                 lr = self.setup.learning_rate
+                decay_rate = self.setup.decay_rate
                 beta1 = self.setup.beta1
                 beta2 = self.setup.beta2
                 epsilon = self.setup.epsilon_adam
@@ -10382,8 +10383,11 @@ class FF_Optimizer(Optimizer):
                         # Compute bias-corrected second raw moment estimate
                         v_hat = v / (1 - beta2 ** t)
                         
+                        # Learning rate decay
+                        lr_t = lr / (1.0 + decay_rate * t)
+                        
                         # Update parameters
-                        params = params - lr * m_hat / (np.sqrt(v_hat) + epsilon)
+                        params = params - lr_t * m_hat / (np.sqrt(v_hat) + epsilon)
                         
                         # Clip to bounds
                         for i, (lb, ub) in enumerate(bounds):
@@ -10433,7 +10437,7 @@ class FF_Optimizer(Optimizer):
                             sys.stdout.flush()
                     
                     if epoch % log_every == 0 or epoch < log_every:
-                        print(f'Adam Epoch {epoch}, Train Cost = {train_cost:.6e}, Dev Cost = {dev_cost:.6e}, LR = {lr:.4e}')
+                        print(f'Adam Epoch {epoch}, Train Cost = {train_cost:.6e}, Dev Cost = {dev_cost:.6e}, LR = {lr_t:.4e}')
                         sys.stdout.flush()
                     
                     epoch += 1
