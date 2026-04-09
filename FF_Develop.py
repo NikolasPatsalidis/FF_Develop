@@ -10271,6 +10271,9 @@ class FF_Optimizer(Optimizer):
                                 perturbation = np.random.normal(0, gamma * (ub - lb))
                                 params[idx] = np.clip(params[idx] + perturbation, lb, ub)
                             
+                            # Clear history to restart detection
+                            cost_history.clear()
+                            
                             n_escapes += 1
                             print(f'SGD Epoch {epoch}: Local minima detected, perturbed {len(param_indices)} params (escape #{n_escapes})')
                             sys.stdout.flush()
@@ -10421,6 +10424,9 @@ class FF_Optimizer(Optimizer):
                             m = np.zeros_like(params)
                             v = np.zeros_like(params)
                             t = 0
+                            
+                            # Clear history to restart detection
+                            cost_history.clear()
                             
                             n_escapes += 1
                             print(f'Adam Epoch {epoch}: Local minima detected, perturbed {len(param_indices)} params (escape #{n_escapes})')
