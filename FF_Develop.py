@@ -10271,7 +10271,8 @@ class FF_Optimizer(Optimizer):
                                 perturbation = np.random.normal(0, gamma * (ub - lb))
                                 params[idx] = np.clip(params[idx] + perturbation, lb, ub)
                             
-                            # Clear history to restart detection
+                            # Reset learning rate and clear history to restart
+                            total_iterations = 0
                             cost_history.clear()
                             
                             n_escapes += 1
@@ -10424,7 +10425,7 @@ class FF_Optimizer(Optimizer):
                                 perturbation = np.random.normal(0, gamma * (ub - lb))
                                 params[idx] = np.clip(params[idx] + perturbation, lb, ub)
                             
-                            # Reset momentum after perturbation
+                            # Reset momentum and learning rate after perturbation
                             m = np.zeros_like(params)
                             v = np.zeros_like(params)
                             t = 0
