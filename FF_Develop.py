@@ -5783,6 +5783,9 @@ class Setup_Interfacial_Optimization():
         'epsilon_adam':1e-8,
         'batch_size':64,
         'decay_rate':0.0,
+        'lm_iterations':100,
+        'max_moves':5,
+        'increased_stochasticity':0.1,
         
         'weighting_method':'constant',
         'w':1.0,
@@ -10170,8 +10173,11 @@ class FF_Optimizer(Optimizer):
                 lr = self.setup.learning_rate
                 decay_rate = self.setup.decay_rate
                 batch_size = self.setup.batch_size
+                lm_iterations = self.setup.lm_iterations
+                max_moves = self.setup.max_moves
+                gamma = self.setup.increased_stochasticity
                 
-                best_cost = 1e16
+                best_dev_cost = 1e16
                 best_params = params.copy()
                 total_train_indexes = self.train_indexes.copy()
                 n_total = len(total_train_indexes)
@@ -10197,12 +10203,20 @@ class FF_Optimizer(Optimizer):
                     mu_e, std_e, mu_f, std_f = self.get_normalized_data('train')
                     full_args = (*full_args, mu_e, std_e, mu_f, std_f)
                 
+                # Pre-compute dev set args for best model selection
+                _, _, dev_args, _, _ = self.get_params_n_args('init', 'dev')
+                if normalize_data:
+                    mu_e, std_e, mu_f, std_f = self.get_normalized_data('dev')
+                    dev_args = (*dev_args, mu_e, std_e, mu_f, std_f)
+                
                 n_batches = len(batch_args_dict)
                 print(f'SGD: Pre-computed {n_batches} batches, starting optimization...')
                 sys.stdout.flush()
                 
                 epoch = 0
                 total_iterations = 0
+                cost_history = []
+                n_escapes = 0
                 
                 while epoch < maxiter:
                     # Shuffle batch order at each epoch
@@ -10227,14 +10241,46 @@ class FF_Optimizer(Optimizer):
                         total_iterations += 1
                     
                     # Evaluate on full training set at end of epoch
-                    cost = self.CostFunction(params, *full_args)
+                    train_cost = self.CostFunction(params, *full_args)
                     
-                    if cost < best_cost:
-                        best_cost = cost
+                    # Evaluate on dev set for best model selection
+                    dev_cost = self.CostFunction(params, *dev_args)
+                    cost_history.append(dev_cost)
+                    
+                    # Store best params based on dev set performance
+                    if dev_cost < best_dev_cost:
+                        best_dev_cost = dev_cost
                         best_params = params.copy()
                     
+                    # Local minima detection and escape (start after 3*lm_iterations)
+                    if epoch >= 3 * lm_iterations and len(cost_history) >= lm_iterations:
+                        recent_costs = np.array(cost_history[-lm_iterations:])
+                        mu_cost = np.mean(recent_costs)
+                        std_cost = np.std(recent_costs)
+                        first_cost = recent_costs[0]
+                        last_cost = recent_costs[-1]
+                        
+                        # Detect local minima: cost is low but not improving
+                        if last_cost > max(mu_cost, first_cost) + 2*std_cost:
+                            # Local minima detected - apply random perturbation
+                            n_random_moves = np.random.randint(1, max_moves + 1)
+                            param_indices = np.random.choice(len(params), size=min(n_random_moves, len(params)), replace=False)
+                            
+                            for idx in param_indices:
+                                lb, ub = bounds[idx]
+                                perturbation = np.random.normal(0, gamma * (ub - lb))
+                                params[idx] = np.clip(params[idx] + perturbation, lb, ub)
+                            
+                            # Reset learning rate and clear history to restart
+                            total_iterations = 0
+                            cost_history.clear()
+                            
+                            n_escapes += 1
+                            print(f'SGD Epoch {epoch}: Local minima detected, perturbed {len(param_indices)} params (escape #{n_escapes})')
+                            sys.stdout.flush()
+                    
                     if epoch % 10 == 0:
-                        print(f'SGD Epoch {epoch}, Cost = {cost:.6e}, LR = {lr_t:.4e}')
+                        print(f'SGD Epoch {epoch}, Train Cost = {train_cost:.6e}, Dev Cost = {dev_cost:.6e}, LR = {lr_t:.4e}')
                         sys.stdout.flush()
                     
                     epoch += 1
@@ -10248,8 +10294,8 @@ class FF_Optimizer(Optimizer):
                         self.nfev = nfev
                         self.success = True
                 
-                res = OptResult(best_params, best_cost, total_iterations)
-                print(f'SGD Finished: Best Cost = {best_cost:.6e}, Time = {perf_counter()-tmethod:.3e} sec')
+                res = OptResult(best_params, best_dev_cost, total_iterations)
+                print(f'SGD Finished: Best Dev Cost = {best_dev_cost:.6e}, Escapes = {n_escapes}, Time = {perf_counter()-tmethod:.3e} sec')
                 sys.stdout.flush()
             
             elif opt_method == 'Adam':
@@ -10259,16 +10305,20 @@ class FF_Optimizer(Optimizer):
                 tmethod = perf_counter()
                 
                 lr = self.setup.learning_rate
+                decay_rate = self.setup.decay_rate
                 beta1 = self.setup.beta1
                 beta2 = self.setup.beta2
                 epsilon = self.setup.epsilon_adam
                 batch_size = self.setup.batch_size
+                lm_iterations = self.setup.lm_iterations
+                max_moves = self.setup.max_moves
+                gamma = self.setup.increased_stochasticity
                 
                 # Initialize moment estimates
                 m = np.zeros_like(params)
                 v = np.zeros_like(params)
                 
-                best_cost = 1e16
+                best_dev_cost = 1e16
                 best_params = params.copy()
                 total_train_indexes = self.train_indexes.copy()
                 n_total = len(total_train_indexes)
@@ -10294,12 +10344,20 @@ class FF_Optimizer(Optimizer):
                     mu_e, std_e, mu_f, std_f = self.get_normalized_data('train')
                     full_args = (*full_args, mu_e, std_e, mu_f, std_f)
                 
+                # Pre-compute dev set args for best model selection
+                _, _, dev_args, _, _ = self.get_params_n_args('init', 'dev')
+                if normalize_data:
+                    mu_e, std_e, mu_f, std_f = self.get_normalized_data('dev')
+                    dev_args = (*dev_args, mu_e, std_e, mu_f, std_f)
+                
                 n_batches = len(batch_args_dict)
                 print(f'Adam: Pre-computed {n_batches} batches, starting optimization...')
                 sys.stdout.flush()
                 
                 t = 0  # timestep
                 epoch = 0
+                cost_history = []
+                n_escapes = 0
                 
                 log_every=10
                 while epoch < maxiter:
@@ -10326,22 +10384,61 @@ class FF_Optimizer(Optimizer):
                         # Compute bias-corrected second raw moment estimate
                         v_hat = v / (1 - beta2 ** t)
                         
+                        # Learning rate decay
+                        lr_t = lr / (1.0 + decay_rate * t)
+                        
                         # Update parameters
-                        params = params - lr * m_hat / (np.sqrt(v_hat) + epsilon)
+                        params = params - lr_t * m_hat / (np.sqrt(v_hat) + epsilon)
                         
                         # Clip to bounds
                         for i, (lb, ub) in enumerate(bounds):
                             params[i] = np.clip(params[i], lb, ub)
                     
                     # Evaluate on full training set at end of epoch
-                    cost = self.CostFunction(params, *full_args)
+                    train_cost = self.CostFunction(params, *full_args)
                     
-                    if cost < best_cost:
-                        best_cost = cost
+                    # Evaluate on dev set for best model selection
+                    dev_cost = self.CostFunction(params, *dev_args)
+                    cost_history.append(dev_cost)
+                    
+                    # Store best params based on dev set performance
+                    if dev_cost < best_dev_cost:
+                        best_dev_cost = dev_cost
                         best_params = params.copy()
                     
-                    if epoch % log_every== 0 or epoch < log_every:
-                        print(f'Adam Epoch {epoch}, Cost = {cost:.6e}')
+                    # Local minima detection and escape (start after 3*lm_iterations)
+                    if epoch >= 3 * lm_iterations and len(cost_history) >= lm_iterations:
+                        recent_costs = np.array(cost_history[-lm_iterations:])
+                        mu_cost = np.mean(recent_costs)
+                        std_cost = np.std(recent_costs)
+                        first_cost = np.mean(recent_costs[0:3])
+                        last_cost = np.mean(recent_costs[-3:])
+                        
+                        # Detect local minima: cost is low but not improving
+                        if last_cost > max(mu_cost, first_cost) + 2*std_cost:
+                            # Local minima detected - apply random perturbation
+                            n_random_moves = np.random.randint(1, max_moves + 1)
+                            param_indices = np.random.choice(len(params), size=min(n_random_moves, len(params)), replace=False)
+                            
+                            for idx in param_indices:
+                                lb, ub = bounds[idx]
+                                perturbation = np.random.normal(0, gamma * (ub - lb))
+                                params[idx] = np.clip(params[idx] + perturbation, lb, ub)
+                            
+                            # Reset momentum and learning rate after perturbation
+                            m = np.zeros_like(params)
+                            v = np.zeros_like(params)
+                            t = 0
+                            
+                            # Clear history to restart detection
+                            cost_history.clear()
+                            
+                            n_escapes += 1
+                            print(f'Adam Epoch {epoch}: Local minima detected, perturbed {len(param_indices)} params (escape #{n_escapes})')
+                            sys.stdout.flush()
+                    
+                    if epoch % log_every == 0 or epoch < log_every:
+                        print(f'Adam Epoch {epoch}, Train Cost = {train_cost:.6e}, Dev Cost = {dev_cost:.6e}, LR = {lr_t:.4e}')
                         sys.stdout.flush()
                     
                     epoch += 1
@@ -10355,8 +10452,8 @@ class FF_Optimizer(Optimizer):
                         self.nfev = nfev
                         self.success = True
                 
-                res = OptResult(best_params, best_cost, t)
-                print(f'Adam Finished: Best Cost = {best_cost:.6e}, Time = {perf_counter()-tmethod:.3e} sec')
+                res = OptResult(best_params, best_dev_cost, t)
+                print(f'Adam Finished: Best Dev Cost = {best_dev_cost:.6e}, Escapes = {n_escapes}, Time = {perf_counter()-tmethod:.3e} sec')
                 sys.stdout.flush()
             
             else:
