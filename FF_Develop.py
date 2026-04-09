@@ -10261,7 +10261,7 @@ class FF_Optimizer(Optimizer):
                         last_cost = recent_costs[-1]
                         
                         # Detect local minima: cost is low but not improving
-                        if last_cost > mu_cost + std_cost and last_cost - first_cost < std_cost:
+                        if last_cost > max(mu_cost, first_cost) + 2*std_cost:
                             # Local minima detected - apply random perturbation
                             n_random_moves = np.random.randint(1, max_moves + 1)
                             param_indices = np.random.choice(len(params), size=min(n_random_moves, len(params)), replace=False)
@@ -10411,11 +10411,11 @@ class FF_Optimizer(Optimizer):
                         recent_costs = np.array(cost_history[-lm_iterations:])
                         mu_cost = np.mean(recent_costs)
                         std_cost = np.std(recent_costs)
-                        first_cost = recent_costs[0]
-                        last_cost = recent_costs[-1]
+                        first_cost = np.mean(recent_costs[0:3])
+                        last_cost = np.mean(recent_costs[-3:])
                         
                         # Detect local minima: cost is low but not improving
-                        if last_cost > mu_cost + std_cost and last_cost - first_cost < std_cost:
+                        if last_cost > max(mu_cost, first_cost) + 2*std_cost:
                             # Local minima detected - apply random perturbation
                             n_random_moves = np.random.randint(1, max_moves + 1)
                             param_indices = np.random.choice(len(params), size=min(n_random_moves, len(params)), replace=False)
