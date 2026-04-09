@@ -669,6 +669,8 @@ class ActiveLearningPipeline:
         print(f'Selection time = {perf_counter() - t1:.3e} sec')
         print(f'Selected {len(selected_data)} configurations')
         
+        sys.stdout.flush()
+
         return selected_data
     
     def _sample_via_langevin(self, data, iteration):
