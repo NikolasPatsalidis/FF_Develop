@@ -7,7 +7,7 @@
 !lammpsreader.py
 !active_learning.py
 !qe_io.py
-
+!plot_al_convergence.py
 
 # Keep tests
 !Tools

@@ -1790,12 +1790,14 @@ class al_help():
         
             inter.InteractionsForData(setup)
             inter.test_descriptor_calculations(tol=1e-6)
+        
         dataMan = Data_Manager(data,setup)
+        
         train_indexes, dev_indexes = dataMan.train_development_split()
         
-               
         optimizer = FF_Optimizer(data,train_indexes, dev_indexes,setup)
         
+       
         method = setup.training_method
         
         min_per_system = np.min( [ np.count_nonzero( data['sys_name'] == name ) for name in np.unique(data['sys_name']) ] )
@@ -5757,8 +5759,8 @@ class Setup_Interfacial_Optimization():
         'reg_par': 1e-6,
         
         'maxiter':300,
-        'max_moves':10,
-        'increased_stochasticity':0.2,
+        'max_escape_moves':10,
+        'gamma_escape':0.2,
         'SLSQP_batchsize':100000,
         'tolerance':1e-5,
         
@@ -5783,9 +5785,9 @@ class Setup_Interfacial_Optimization():
         'epsilon_adam':1e-8,
         'batch_size':64,
         'decay_rate':0.0,
-        'lm_iterations':100,
-        'max_moves':5,
-        'increased_stochasticity':0.1,
+        'escape_window':100,
+        'max_escape_moves':5,
+        'gamma_escape':0.1,
         
         'weighting_method':'constant',
         'w':1.0,
@@ -9587,10 +9589,10 @@ class FF_Optimizer(Optimizer):
     def randomize_initial_params(self,params,bounds):
         """Apply random perturbations to initial parameters."""
         params = params.copy()
-        if self.setup.increased_stochasticity >0 and self.randomize:
-            s = self.setup.increased_stochasticity
+        if self.setup.gamma_escape >0 and self.randomize:
+            s = self.setup.gamma_escape
             ran = [b[1]-b[0] for b in bounds]
-            moves = np.random.randint(1,self.setup.max_moves)
+            moves = np.random.randint(1,self.setup.max_escape_moves)
             for _ in range(moves):
                 change_id = np.random.randint(0,params.shape[0])
                 params[change_id] += np.random.normal(0,s*ran[change_id])
@@ -10093,9 +10095,9 @@ class FF_Optimizer(Optimizer):
                 self.set_results()
 
                 self.train_indexes = self.total_train_indexes
-                temp = self.setup.increased_stochasticity
+                temp = self.setup.gamma_escape
 
-                self.setup.increased_stochasticity = 0.0
+                self.setup.gamma_escape = 0.0
                 
                 #self.optimize_params()
 
@@ -10103,7 +10105,7 @@ class FF_Optimizer(Optimizer):
                 sys.stdout.flush()
                 #fixing setup
                 self.setup.optimization_method = 'stochastic_SLSQP'
-                self.setup.increased_stochasticity = temp
+                self.setup.gamma_escape = temp
                 print('STOCHASTIC SLSQP FINISHED')
                 sys.stdout.flush()
                 return 
@@ -10173,9 +10175,9 @@ class FF_Optimizer(Optimizer):
                 lr = self.setup.learning_rate
                 decay_rate = self.setup.decay_rate
                 batch_size = self.setup.batch_size
-                lm_iterations = self.setup.lm_iterations
-                max_moves = self.setup.max_moves
-                gamma = self.setup.increased_stochasticity
+                escape_window = self.setup.escape_window
+                max_escape_moves = self.setup.max_escape_moves
+                gamma = self.setup.gamma_escape
                 
                 best_dev_cost = 1e16
                 best_params = params.copy()
@@ -10252,9 +10254,9 @@ class FF_Optimizer(Optimizer):
                         best_dev_cost = dev_cost
                         best_params = params.copy()
                     
-                    # Local minima detection and escape (start after 3*lm_iterations)
-                    if epoch >= 3 * lm_iterations and len(cost_history) >= lm_iterations:
-                        recent_costs = np.array(cost_history[-lm_iterations:])
+                    # Local minima detection and escape (start after 3*escape_window)
+                    if epoch >= 3 * escape_window and len(cost_history) >= escape_window:
+                        recent_costs = np.array(cost_history[-escape_window:])
                         mu_cost = np.mean(recent_costs)
                         std_cost = np.std(recent_costs)
                         first_cost = recent_costs[0]
@@ -10263,7 +10265,7 @@ class FF_Optimizer(Optimizer):
                         # Detect local minima: cost is low but not improving
                         if last_cost > max(mu_cost, first_cost) + 2*std_cost:
                             # Local minima detected - apply random perturbation
-                            n_random_moves = np.random.randint(1, max_moves + 1)
+                            n_random_moves = np.random.randint(1, max_escape_moves + 1)
                             param_indices = np.random.choice(len(params), size=min(n_random_moves, len(params)), replace=False)
                             
                             for idx in param_indices:
@@ -10310,9 +10312,9 @@ class FF_Optimizer(Optimizer):
                 beta2 = self.setup.beta2
                 epsilon = self.setup.epsilon_adam
                 batch_size = self.setup.batch_size
-                lm_iterations = self.setup.lm_iterations
-                max_moves = self.setup.max_moves
-                gamma = self.setup.increased_stochasticity
+                escape_window = self.setup.escape_window
+                max_escape_moves = self.setup.max_escape_moves
+                gamma = self.setup.gamma_escape
                 
                 # Initialize moment estimates
                 m = np.zeros_like(params)
@@ -10406,9 +10408,9 @@ class FF_Optimizer(Optimizer):
                         best_dev_cost = dev_cost
                         best_params = params.copy()
                     
-                    # Local minima detection and escape (start after 3*lm_iterations)
-                    if epoch >= 3 * lm_iterations and len(cost_history) >= lm_iterations:
-                        recent_costs = np.array(cost_history[-lm_iterations:])
+                    # Local minima detection and escape (start after 3*escape_window)
+                    if epoch >= 3 * escape_window and len(cost_history) >= escape_window:
+                        recent_costs = np.array(cost_history[-escape_window:])
                         mu_cost = np.mean(recent_costs)
                         std_cost = np.std(recent_costs)
                         first_cost = np.mean(recent_costs[0:3])
@@ -10417,7 +10419,7 @@ class FF_Optimizer(Optimizer):
                         # Detect local minima: cost is low but not improving
                         if last_cost > max(mu_cost, first_cost) + 2*std_cost:
                             # Local minima detected - apply random perturbation
-                            n_random_moves = np.random.randint(1, max_moves + 1)
+                            n_random_moves = np.random.randint(1, max_escape_moves + 1)
                             param_indices = np.random.choice(len(params), size=min(n_random_moves, len(params)), replace=False)
                             
                             for idx in param_indices:
