@@ -1282,7 +1282,7 @@ bS              = 20.0
 optimization_method = Adam
 opt_disp        = 0
 optimize        = 1
-costf           = MSEo
+costf           = MSE
 
 training_method = fixed_lambda
 random_initializations = 4
@@ -1295,8 +1295,8 @@ regularization_method = lasso
 reg_par         = 0.00001
 
 maxiter         = 130
-max_moves       = 100
-increased_stochasticity = 0.2
+max_escape_moves       = 100
+gamma_escape = 0.2
 SLSQP_batchsize = 100000
 tolerance       = 0.000001
 
