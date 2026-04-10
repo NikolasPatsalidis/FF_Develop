@@ -136,6 +136,7 @@ class ActiveLearningConfig(ConfigBase):
         'max_ener' : 50,                      # maximum energy to keep the data in kcal/mol
         'max_force': 70.0,                    # maximum force magnitude to keep data in kcal/mol/Å
         'bC': 50.0,                           # kcal/mol - energy range scale for Boltzmann downsampling
+        'min_new_data_retention': 0.3,        # minimum fraction of new batch data to retain (based on lowest energies)
         # Langevin MD sampling parameters
         'md_initial_configs': 10,             # number of initial configs to start MD from
         'md_friction': 0.01,                  # friction coefficient (1/fs)
@@ -528,6 +529,25 @@ class ActiveLearningPipeline:
         t0 = perf_counter()
         n_initial = len(data)
         
+        # Identify new batch data (last batch_size entries) and protect lowest energy configs
+        batch_size = self.al_config.batch_size
+        retention_frac = self.al_config.min_new_data_retention
+        if n_initial >= batch_size:
+            new_batch_data = data.iloc[-batch_size:].copy()
+            n_retain = max(1, int(retention_frac * batch_size))
+            # Get indices of lowest energy configs in new batch (per system)
+            protected_indices = []
+            for sys_name in new_batch_data['sys_name'].unique():
+                sys_data = new_batch_data[new_batch_data['sys_name'] == sys_name]
+                n_sys_retain = max(1, int(retention_frac * len(sys_data)))
+                lowest_energy_idx = sys_data.nsmallest(n_sys_retain, 'Energy').index.tolist()
+                protected_indices.extend(lowest_energy_idx)
+            protected_data = data.loc[protected_indices].copy()
+            print(f'Protected {len(protected_indices)} lowest-energy configs from new batch (retention={retention_frac:.0%})')
+        else:
+            protected_indices = []
+            protected_data = None
+        
         # Step 1: Filter by QE quality metrics (if columns exist)
         if 'energy_error' in data.columns:
             n_before = len(data)
@@ -584,6 +604,24 @@ class ActiveLearningPipeline:
         data = self.al.clean_data(data, self.al_config.bC, self.beta_sampling)
         print('After FF cleaning:')
         self._print_column_stats(data['Energy'])
+        
+        # Step 4: Ensure minimum retention of new batch data (lowest energy configs)
+        if protected_data is not None and len(protected_indices) > 0:
+            # Find which protected configs were removed
+            removed_protected = [idx for idx in protected_indices if idx not in data.index]
+            if len(removed_protected) > 0:
+                # Append removed protected configs back
+                configs_to_add = protected_data.loc[removed_protected]
+                data = pd.concat([data, configs_to_add], ignore_index=False)
+                print(f'Re-added {len(removed_protected)} protected lowest-energy configs from new batch')
+        
+        # Summary statistics
+        n_final = len(data)
+        if n_initial >= batch_size:
+            n_batch_retained = sum(1 for idx in new_batch_data.index if idx in data.index)
+            print(f'\nCleaning Summary: Total {n_initial} -> {n_final} | Batch {batch_size} -> {n_batch_retained}')
+        else:
+            print(f'\nCleaning Summary: Total {n_initial} -> {n_final}')
         
         print(f'Data cleaning time = {perf_counter() - t0:.3e} sec')
         return data
