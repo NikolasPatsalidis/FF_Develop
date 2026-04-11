@@ -701,14 +701,15 @@ class ActiveLearningPipeline:
         if len(candidate_data) <= self.batch_size:
             selected_data = candidate_data
             print(f'All {len(candidate_data)} candidates selected (below batch_size)')
-        else:
-            # Map config selection_method to function method parameter
-            method_map = {'random': 'random', 'ood': 'histogram_uncertainty'}
-            method = method_map.get(self.al_config.selection_method, 'random')
-            print(f'Selection method: {self.al_config.selection_method} -> {method}')
+        elif self.al_config.selection_method == 'ood':
             selected_data = self.al.random_selection(
-                data,  candidate_data, self.setup, self.al_config, method=method
+                data,  candidate_data, self.setup, self.al_config,
             )
+        elif self.al_config.selection_method == 'random':
+            selected_data = candidate_data.sample(self.al_config.batch_size)
+        else:
+            raise ValueError(f"Unknown selection_method: {self.al_config.selection_method}")
+        
         selected_data = selected_data.reset_index(drop=True)
         
         print(f'Selection time = {perf_counter() - t1:.3e} sec')
