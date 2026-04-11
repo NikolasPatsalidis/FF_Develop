@@ -9703,11 +9703,10 @@ class FF_Optimizer(Optimizer):
                 force_filter)
         
         if return_weights:
-            # Return weights indexed for the current dataset
-            if dataset == 'train':
-                w = weights
-            else:
-                w = None  # No weighting for non-training datasets
+            # Compute weights for the requested dataset
+            data_for_weights = getattr(self, f'data_{dataset}')
+            w = GeneralFunctions.weighting(data_for_weights,
+                    self.setup.weighting_method, self.setup.bT, self.setup.w)
             return params, bounds, args, fixed_parameters, isnot_fixed, w
         return params, bounds, args, fixed_parameters, isnot_fixed
 
@@ -10221,13 +10220,13 @@ class FF_Optimizer(Optimizer):
                 else:
                     full_args = (*full_args, 0.0, 1.0, 0.0, 1.0, full_weights)
                 
-                # Pre-compute dev set args for best model selection (NO weights for evaluation)
-                _, _, dev_args, _, _ = self.get_params_n_args('init', 'dev')
+                # Pre-compute dev set args for best model selection (with weights for evaluation)
+                _, _, dev_args, _, _, dev_weights = self.get_params_n_args('init', 'dev', return_weights=True)
                 if normalize_data:
                     mu_e, std_e, mu_f, std_f = self.get_normalized_data('dev')
-                    dev_args = (*dev_args, mu_e, std_e, mu_f, std_f, None)
+                    dev_args = (*dev_args, mu_e, std_e, mu_f, std_f, dev_weights)
                 else:
-                    dev_args = (*dev_args, 0.0, 1.0, 0.0, 1.0, None)
+                    dev_args = (*dev_args, 0.0, 1.0, 0.0, 1.0, dev_weights)
                 
                 n_batches = len(batch_args_dict)
                 print(f'SGD: Pre-computed {n_batches} batches, starting optimization...')
@@ -10368,13 +10367,13 @@ class FF_Optimizer(Optimizer):
                 else:
                     full_args = (*full_args, 0.0, 1.0, 0.0, 1.0, full_weights)
                 
-                # Pre-compute dev set args for best model selection (NO weights for evaluation)
-                _, _, dev_args, _, _ = self.get_params_n_args('init', 'dev')
+                # Pre-compute dev set args for best model selection (with weights for evaluation)
+                _, _, dev_args, _, _, dev_weights = self.get_params_n_args('init', 'dev', return_weights=True)
                 if normalize_data:
                     mu_e, std_e, mu_f, std_f = self.get_normalized_data('dev')
-                    dev_args = (*dev_args, mu_e, std_e, mu_f, std_f, None)
+                    dev_args = (*dev_args, mu_e, std_e, mu_f, std_f, dev_weights)
                 else:
-                    dev_args = (*dev_args, 0.0, 1.0, 0.0, 1.0, None)
+                    dev_args = (*dev_args, 0.0, 1.0, 0.0, 1.0, dev_weights)
                 
                 n_batches = len(batch_args_dict)
                 print(f'Adam: Pre-computed {n_batches} batches, starting optimization...')
