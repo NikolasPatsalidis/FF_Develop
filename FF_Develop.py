@@ -9238,10 +9238,11 @@ class FF_Optimizer(Optimizer):
                      measure,reg_measure,
                      force_filter=None,
                      mu_e =0.0, std_e=1.0,
-                     mu_f = 0.0, std_f=1.0):
+                     mu_f = 0.0, std_f=1.0,
+                     weights=None):
         """Compute total cost combining energy, force, and regularization terms."""
         
-        cE = CostFunctions.Energy(params, Energy, models_list_info, measure, mu_e,std_e)
+        cE = CostFunctions.Energy(params, Energy, models_list_info, measure, mu_e,std_e, weights)
         cR = reg*CostFunctions.Regularization(params,reguls,reg_measure) 
         cF = CostFunctions.Forces(params, Forces, models_list_info, measure, mu_f,std_f, force_filter) 
         cost = (1.0-lambda_force)*cE + lambda_force*cF + cR
@@ -9254,9 +9255,10 @@ class FF_Optimizer(Optimizer):
                 measure,reg_measure,
                 force_filter=None,
                 mu_e =0.0, std_e=1.0,
-                mu_f = 0.0, std_f=1.0):
+                mu_f = 0.0, std_f=1.0,
+                weights=None):
         """Compute gradient of total cost w.r.t. parameters."""
-        gradE = CostFunctions.gradEnergy(params, Energy, models_list_info, measure, mu_e,std_e)
+        gradE = CostFunctions.gradEnergy(params, Energy, models_list_info, measure, mu_e,std_e, weights)
         gradR = reg*CostFunctions.gradRegularization(params,reguls,reg_measure) 
         gradF = CostFunctions.gradForces(params, Forces, models_list_info, measure, mu_f,std_f, force_filter) 
         grads =  (1.0-lambda_force)*gradE + lambda_force*gradF + gradR
@@ -9671,7 +9673,7 @@ class FF_Optimizer(Optimizer):
         
         return Forces, force_filter
     
-    def get_params_n_args(self,setfrom,dataset):
+    def get_params_n_args(self,setfrom,dataset,return_weights=False):
         """Prepare parameters and arguments for optimization."""
         
         E = self.get_Energy(dataset)
@@ -9700,6 +9702,13 @@ class FF_Optimizer(Optimizer):
                 self.setup.regularization_method,
                 force_filter)
         
+        if return_weights:
+            # Return weights indexed for the current dataset
+            if dataset == 'train':
+                w = weights
+            else:
+                w = None  # No weighting for non-training datasets
+            return params, bounds, args, fixed_parameters, isnot_fixed, w
         return params, bounds, args, fixed_parameters, isnot_fixed
 
     def pareto_via_scan(self,setfrom='init'):
@@ -9708,7 +9717,7 @@ class FF_Optimizer(Optimizer):
         nrandom, npareto = self.setup.random_initializations, self.setup.npareto
         tol = self.setup.tolerance
 
-        params, bounds,  args, fixed_parameters, isnot_fixed = self.get_params_n_args(setfrom,'train')
+        params, bounds,  args, fixed_parameters, isnot_fixed, train_weights = self.get_params_n_args(setfrom,'train',return_weights=True)
         
         (Energy,Forces, lambda_force,models_list_info, 
                  reg_par, reguls,
@@ -9719,7 +9728,9 @@ class FF_Optimizer(Optimizer):
         normalize_data = self.setup.normalize_data
         if normalize_data:
             mu_e, std_e, mu_f, std_f = self.get_normalized_data('train')
-            args = (*args, mu_e, std_e, mu_f, std_f)
+            args = (*args, mu_e, std_e, mu_f, std_f, train_weights)
+        else:
+            args = (*args, 0.0, 1.0, 0.0, 1.0, train_weights)
         if params.shape[0] >0 and self.setup.optimize :
             self.randomize = True
             best_params, success, best_iter = params,  False,0
@@ -9916,9 +9927,9 @@ class FF_Optimizer(Optimizer):
             return 
     @staticmethod
     def costEnergy(params,Energy, models_list_info, 
-                   reg_par, reguls, measure, measure_reg, mu_e=0, std_e=0):
+                   reg_par, reguls, measure, measure_reg, mu_e=0, std_e=0, weights=None):
         """Compute energy cost with regularization."""
-        cE = CostFunctions.Energy(params, Energy, models_list_info, measure, mu_e,std_e)
+        cE = CostFunctions.Energy(params, Energy, models_list_info, measure, mu_e,std_e, weights)
         cR = reg_par*CostFunctions.Regularization(params,reguls,measure_reg) 
         return cE + cR
     
@@ -9944,9 +9955,9 @@ class FF_Optimizer(Optimizer):
     
     @staticmethod
     def gradEnergy(params,Energy, models_list_info, 
-                   reg_par, reguls, measure, measure_reg, mu_e=0, std_e=0):
+                   reg_par, reguls, measure, measure_reg, mu_e=0, std_e=0, weights=None):
         """Gradient of energy cost with regularization."""
-        gE = CostFunctions.gradEnergy(params, Energy, models_list_info, measure, mu_e,std_e)
+        gE = CostFunctions.gradEnergy(params, Energy, models_list_info, measure, mu_e,std_e, weights)
         gR = reg_par*CostFunctions.gradRegularization(params,reguls,measure_reg) 
         return gE + gR
     
@@ -9967,15 +9978,16 @@ class FF_Optimizer(Optimizer):
         tol = self.setup.tolerance
         maxiter = self.setup.maxiter
         
-        params, bounds,  args, fixed_parameters, isnot_fixed = self.get_params_n_args(setfrom,'train')
+        params, bounds,  args, fixed_parameters, isnot_fixed, train_weights = self.get_params_n_args(setfrom,'train',return_weights=True)
         
         n_train = args[0].shape[0]
 
         normalize_data = self.setup.normalize_data
         if normalize_data:
             mu_e, std_e, mu_f, std_f = self.get_normalized_data('train')
-
-            args = (*args, mu_e, std_e, mu_f,std_f ) 
+            args = (*args, mu_e, std_e, mu_f, std_f, train_weights)
+        else:
+            args = (*args, 0.0, 1.0, 0.0, 1.0, train_weights) 
         try:
             self.randomize
         
@@ -10192,24 +10204,30 @@ class FF_Optimizer(Optimizer):
                     batch_end = min(batch_start + batch_size, n_total)
                     self.train_indexes = total_train_indexes[batch_start:batch_end]
                     
-                    _, _, batch_args, _, _ = self.get_params_n_args('init', 'train')
+                    _, _, batch_args, _, _, batch_weights = self.get_params_n_args('init', 'train', return_weights=True)
                     if normalize_data:
                         mu_e, std_e, mu_f, std_f = self.get_normalized_data('train')
-                        batch_args = (*batch_args, mu_e, std_e, mu_f, std_f)
+                        batch_args = (*batch_args, mu_e, std_e, mu_f, std_f, batch_weights)
+                    else:
+                        batch_args = (*batch_args, 0.0, 1.0, 0.0, 1.0, batch_weights)
                     batch_args_dict[batch_idx] = batch_args
                 
-                # Pre-compute full training set args
+                # Pre-compute full training set args (with weights for training cost)
                 self.train_indexes = total_train_indexes
-                _, _, full_args, _, _ = self.get_params_n_args('init', 'train')
+                _, _, full_args, _, _, full_weights = self.get_params_n_args('init', 'train', return_weights=True)
                 if normalize_data:
                     mu_e, std_e, mu_f, std_f = self.get_normalized_data('train')
-                    full_args = (*full_args, mu_e, std_e, mu_f, std_f)
+                    full_args = (*full_args, mu_e, std_e, mu_f, std_f, full_weights)
+                else:
+                    full_args = (*full_args, 0.0, 1.0, 0.0, 1.0, full_weights)
                 
-                # Pre-compute dev set args for best model selection
+                # Pre-compute dev set args for best model selection (NO weights for evaluation)
                 _, _, dev_args, _, _ = self.get_params_n_args('init', 'dev')
                 if normalize_data:
                     mu_e, std_e, mu_f, std_f = self.get_normalized_data('dev')
-                    dev_args = (*dev_args, mu_e, std_e, mu_f, std_f)
+                    dev_args = (*dev_args, mu_e, std_e, mu_f, std_f, None)
+                else:
+                    dev_args = (*dev_args, 0.0, 1.0, 0.0, 1.0, None)
                 
                 n_batches = len(batch_args_dict)
                 print(f'SGD: Pre-computed {n_batches} batches, starting optimization...')
@@ -10333,24 +10351,30 @@ class FF_Optimizer(Optimizer):
                     batch_end = min(batch_start + batch_size, n_total)
                     self.train_indexes = total_train_indexes[batch_start:batch_end]
                     
-                    _, _, batch_args, _, _ = self.get_params_n_args('init', 'train')
+                    _, _, batch_args, _, _, batch_weights = self.get_params_n_args('init', 'train', return_weights=True)
                     if normalize_data:
                         mu_e, std_e, mu_f, std_f = self.get_normalized_data('train')
-                        batch_args = (*batch_args, mu_e, std_e, mu_f, std_f)
+                        batch_args = (*batch_args, mu_e, std_e, mu_f, std_f, batch_weights)
+                    else:
+                        batch_args = (*batch_args, 0.0, 1.0, 0.0, 1.0, batch_weights)
                     batch_args_dict[batch_idx] = batch_args
                 
-                # Pre-compute full training set args
+                # Pre-compute full training set args (with weights for training cost)
                 self.train_indexes = total_train_indexes
-                _, _, full_args, _, _ = self.get_params_n_args('init', 'train')
+                _, _, full_args, _, _, full_weights = self.get_params_n_args('init', 'train', return_weights=True)
                 if normalize_data:
                     mu_e, std_e, mu_f, std_f = self.get_normalized_data('train')
-                    full_args = (*full_args, mu_e, std_e, mu_f, std_f)
+                    full_args = (*full_args, mu_e, std_e, mu_f, std_f, full_weights)
+                else:
+                    full_args = (*full_args, 0.0, 1.0, 0.0, 1.0, full_weights)
                 
-                # Pre-compute dev set args for best model selection
+                # Pre-compute dev set args for best model selection (NO weights for evaluation)
                 _, _, dev_args, _, _ = self.get_params_n_args('init', 'dev')
                 if normalize_data:
                     mu_e, std_e, mu_f, std_f = self.get_normalized_data('dev')
-                    dev_args = (*dev_args, mu_e, std_e, mu_f, std_f)
+                    dev_args = (*dev_args, mu_e, std_e, mu_f, std_f, None)
+                else:
+                    dev_args = (*dev_args, 0.0, 1.0, 0.0, 1.0, None)
                 
                 n_batches = len(batch_args_dict)
                 print(f'Adam: Pre-computed {n_batches} batches, starting optimization...')
@@ -11182,17 +11206,18 @@ class mappers():
 
 class CostFunctions():
     """Static methods for computing cost functions and their gradients."""
-    def Energy(params, Energy, models_list_info, measure, mu=0.0,std=1.0):
+    def Energy(params, Energy, models_list_info, measure, mu=0.0,std=1.0, weights=None):
         """Compute energy cost using the specified measure."""
         ne = Energy.shape[0]
         
         Uclass = FF_Optimizer.computeUclass(params,ne,models_list_info)
         
         func = getattr(measures,measure)
-        ce = func(  (Uclass-mu)/std, (Energy-mu)/std )
+        w = 1 if weights is None else weights
+        ce = func(  (Uclass-mu)/std, (Energy-mu)/std, w )
         return ce
     
-    def gradEnergy(params, Energy, models_list_info, measure, mu=0.0, std=1.0):
+    def gradEnergy(params, Energy, models_list_info, measure, mu=0.0, std=1.0, weights=None):
         """Compute gradient of energy cost w.r.t. parameters."""
         ne = Energy.shape[0]
         
@@ -11200,7 +11225,8 @@ class CostFunctions():
         gradU = FF_Optimizer.gradUclass(params,ne,models_list_info)
         
         func = getattr(measures,'grad_'+measure)
-        grad = np.sum( func( (Uclass-mu)/std, (Energy-mu)/std ) * gradU/std, axis = 1)
+        w = 1 if weights is None else weights
+        grad = np.sum( func( (Uclass-mu)/std, (Energy-mu)/std, w ) * gradU/std, axis = 1)
         
         return grad 
     
