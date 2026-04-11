@@ -145,6 +145,8 @@ class ActiveLearningConfig(ConfigBase):
         'md_sampling_time': 10.0,             # store configurations every this many fs
         'md_save_traj': 'no',                 # 'no', 'sampled', 'full' - save trajectory to xyz
         'md_max_candidates': None,            # max candidates to sample; if None, run full integration_time
+        # Selection method
+        'selection_method': 'ood',         # 'random' or 'ood' (out-of-distribution)
     }
     
     def __init__(self):
@@ -698,9 +700,14 @@ class ActiveLearningPipeline:
         t1 = perf_counter()
         if len(candidate_data) <= self.batch_size:
             selected_data = candidate_data
+            print(f'All {len(candidate_data)} candidates selected (below batch_size)')
         else:
+            # Map config selection_method to function method parameter
+            method_map = {'random': 'random', 'ood': 'histogram_uncertainty'}
+            method = method_map.get(self.al_config.selection_method, 'random')
+            print(f'Selection method: {self.al_config.selection_method} -> {method}')
             selected_data = self.al.random_selection(
-                data,  candidate_data, self.setup, self.al_config
+                data,  candidate_data, self.setup, self.al_config, method=method
             )
         selected_data = selected_data.reset_index(drop=True)
         
