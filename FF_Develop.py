@@ -49,6 +49,29 @@ import ase
 
 import lammpsreader as lammps_reader
 
+@njit(parallel=True, cache=True)
+def _sum_energy_segments(U, dl, du, data_size):
+    """JIT-compiled helper for energy segment summation."""
+    Up = np.empty(data_size, dtype=np.float64)
+    for i in prange(data_size):
+        total = 0.0
+        for k in range(dl[i], du[i]):
+            total += U[k]
+        Up[i] = total
+    return Up
+
+@njit(parallel=True, cache=True)
+def _sum_gradient_segments(g, dl, du, n_p, data_size):
+    """JIT-compiled helper for gradient segment summation."""
+    gu = np.empty((n_p, data_size), dtype=np.float64)
+    for j in prange(n_p):
+        for i in range(data_size):
+            total = 0.0
+            for k in range(dl[i], du[i]):
+                total += g[j, k]
+            gu[j, i] = total
+    return gu
+
 class Parsers():
     """Base class for parsing molecular structure files.
 
@@ -8582,14 +8605,11 @@ class FF_Optimizer(Optimizer):
     @staticmethod
     def UperModelContribution(u_model,dists,dl,du,model_pars,*model_args):
         """Compute energy contribution from a single model for all data points."""
-        Up = np.empty((dl.shape[0]), dtype=np.float64)
         pobj = u_model(dists,model_pars,*model_args)
         U = pobj.u_vectorized()
-        #U = u_model(*a)
         
-        for i in range(Up.size):
-            ui = U[dl[i] : du[i]].sum() #if du[i] -dl[i]>0 else 0
-            Up[i] = ui 
+        # Use JIT-compiled parallel summation
+        Up = _sum_energy_segments(U, dl, du, dl.shape[0])
         
         return Up
    
@@ -8598,14 +8618,12 @@ class FF_Optimizer(Optimizer):
         """Compute gradient of energy contribution w.r.t. parameters."""
         n_p = model_pars.shape[0]
         data_size = dl.shape[0]
-        gu = np.empty((n_p,data_size), dtype=np.float64)
         
         pobj = u_model(dists,model_pars,*model_args)
         g = pobj.find_gradient() # shape = (n_p, dists.shape[0]) # dists.shape[0] == all the values serialized
-
-        for j in range(n_p):
-            for i in range(data_size):
-                gu[j][i] = g[j][dl[i] : du[i]].sum()
+        
+        # Use JIT-compiled parallel summation
+        gu = _sum_gradient_segments(g, dl, du, n_p, data_size)
         
         return gu
     
