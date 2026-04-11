@@ -1245,8 +1245,73 @@ Examples:
     # Utility arguments
     parser.add_argument('--generate-templates', action='store_true',
                         help='Generate template input files and exit')
+    parser.add_argument('--test', action='store_true',
+                        help='Run tests for init models (descriptors, energy, forces) and exit')
     
     return parser.parse_args()
+
+
+def run_init_model_tests(pipeline):
+    """
+    Run tests for init models: descriptors, energy computation, and forces.
+    
+    Tests performed:
+    1. Load sample data and compute descriptors
+    2. Test analytical vs numerical energy gradients (test_gradUclass)
+    3. Test analytical vs numerical forces (test_ForceClass)
+    
+    Parameters
+    ----------
+    pipeline : ActiveLearningPipeline
+        The initialized pipeline with setup and data paths.
+    """
+    print('='*60)
+    print('INIT MODEL TESTS')
+    print('='*60)
+    
+    # Load data from iteration 0
+    print('\n[1/4] Loading data from D0')
+    path_ffdata = f'{pipeline.datapath}/D0'
+    
+    if not os.path.exists(path_ffdata):
+        print(f'ERROR: Data directory {path_ffdata} not found. Cannot run tests.')
+        return
+    
+    data = pipeline.al.data_from_directory(path_ffdata)
+    pipeline.al.make_absolute_Energy_to_interaction(data, pipeline.setup)
+    
+    if len(data) == 0:
+        print('ERROR: No data found. Cannot run tests.')
+        return
+    
+    print(f'  Total: {len(data)} configurations')
+    
+    # Create optimizer with init models
+    print('\n[2/4] Creating optimizer with init_models')
+    pipeline.setup.optimize = False  # Don't actually optimize
+    optimizer = ff.FF_Optimizer(data, pipeline.setup)
+    
+    # Test descriptor computation
+    print('\n[3/4] Testing descriptor computation and energy')
+    print('-'*40)
+    try:
+        optimizer.test_gradUclass(which='init', dataset='all', epsilon=1e-4, order=4)
+        print('  Energy gradient test PASSED')
+    except Exception as e:
+        print(f'  Energy gradient test FAILED: {e}')
+    
+    # Test forces
+    print('\n[4/4] Testing analytical vs numerical forces')
+    print('-'*40)
+    try:
+        optimizer.test_ForceClass(which='init', epsilon=1e-4, random_tries=5, order=4)
+        print('  Force test PASSED')
+    except Exception as e:
+        print(f'  Force test FAILED: {e}')
+    
+    print('\n' + '='*60)
+    print('TESTS COMPLETE')
+    print('='*60)
 
 
 def generate_template_files(output_dir='.'):
@@ -1819,6 +1884,12 @@ def main():
         datapath=args.datapath,
         results_path=args.results_path
     )
+    
+    # Handle --test mode
+    if args.test:
+        run_init_model_tests(pipeline)
+        return
+    
     # Override existing_data from command line if provided
     if args.existing_data != -1:
         pipeline.existing_data = args.existing_data
