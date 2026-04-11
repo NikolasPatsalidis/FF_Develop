@@ -712,7 +712,7 @@ class ActiveLearningPipeline:
         
         selected_data = selected_data.reset_index(drop=True)
         
-        print(f'Selection time = {perf_counter() - t1:.3e} sec')
+        print(f'Selection method = {self.al_config.selection_method}  ---> Selection time = {perf_counter() - t1:.3e} sec')
         print(f'Selected {len(selected_data)} configurations')
         
         sys.stdout.flush()
