@@ -7058,11 +7058,7 @@ class Interactions():
         
         # Create special_type interactions using the SAME bond pairs as at_type connectivity
         # but with special_types labels (re-label existing connectivity pairs)
-        special_connectivity = {}
-        for pair_ids, at_type_label in connectivity.items():
-            # Re-label the same pair with special_types
-            _, special_label = Interactions.sorted_id_and_type(special_types, pair_ids)
-            special_connectivity[pair_ids] = special_label
+        special_connectivity = Interactions.get_connectivity(Bonds,special_types, self.excludedBondtypes)
         
         special_vdw = Interactions.get_vdw(special_types, bond_d_matrix, self.find_vdw_connected,
                       self.find_vdw_unconnected, self.vdw_bond_dist)
