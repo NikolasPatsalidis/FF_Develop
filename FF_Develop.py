@@ -1810,7 +1810,9 @@ class al_help():
             inter = Interactions(data, setup,
                                 vdw_bond_dist=3,
                                 rho_r0=setup.rho_r0,rho_rc=setup.rho_rc)
-        
+            
+            inter.print_interaction_info(np.random.randint(len(data)) , 'all')
+
             inter.InteractionsForData(setup)
             inter.test_descriptor_calculations(tol=1e-6)
         
@@ -6801,6 +6803,38 @@ class Interactions():
         return united_types
     
     @staticmethod
+    def get_special_types(at_types, neibs):
+        """Generate special type labels based on atom type and neighboring atom types.
+        
+        Format: at_type--neib1neib2neib3... where neighbors are sorted alphabetically.
+        Examples: C--CCHH, C--CHHH, C--CNHH, H--C, H--N
+        
+        Parameters
+        ----------
+        at_types : array-like
+            Array of atom type strings.
+        neibs : dict
+            Dictionary mapping atom index to set of neighbor indices.
+            
+        Returns
+        -------
+        np.ndarray
+            Array of special type strings for each atom.
+        """
+        special_types = np.empty(len(at_types), dtype=object)
+        for i, t in enumerate(at_types):
+            if i in neibs and len(neibs[i]) > 0:
+                # Get neighbor types and sort alphabetically
+                neib_types = sorted([at_types[neib] for neib in neibs[i]])
+                neib_str = ''.join(neib_types)
+                special_types[i] = f"{t}--{neib_str}"
+            else:
+                # No neighbors - just use the atom type
+                special_types[i] = f"{t}--"
+        
+        return special_types
+    
+    @staticmethod
     def get_itypes(model,at_types,bonds,neibs):
         """Get interaction types based on atom model (AA or UA)."""
         logger.debug('atom model = {:s}'.format(model))
@@ -6995,6 +7029,9 @@ class Interactions():
         types = Interactions.get_itypes(self.atom_model,at_types,Bonds,neibs)
         types = Interactions.get_at_types(types.copy(),Bonds)
         
+        # Compute special_types based on neighbors
+        special_types = Interactions.get_special_types(at_types, neibs)
+        
         #1.) Find 2 pair-non bonded interactions
         vdw = Interactions.get_vdw(types, bond_d_matrix, self.find_vdw_connected,
                       self.find_vdw_unconnected,
@@ -7018,12 +7055,44 @@ class Interactions():
                   for k,d in zip(['connectivity','angles','dihedrals','vdw'],
                               [connectivity, angles, dihedrals, vdw])
                  }
+        
+        # Create special_type interactions using the SAME bond pairs as at_type connectivity
+        # but with special_types labels (re-label existing connectivity pairs)
+        special_connectivity = {}
+        for pair_ids, at_type_label in connectivity.items():
+            # Re-label the same pair with special_types
+            _, special_label = Interactions.sorted_id_and_type(special_types, pair_ids)
+            special_connectivity[pair_ids] = special_label
+        
+        special_vdw = Interactions.get_vdw(special_types, bond_d_matrix, self.find_vdw_connected,
+                      self.find_vdw_unconnected, self.vdw_bond_dist)
+        
+        if self.find_angles or self.find_dihedrals:
+            # Use the at_type connectivity for finding angles, but label with special_types
+            special_angles = Interactions.get_angles(connectivity, neibs, special_types)
+            if self.find_dihedrals:
+                special_dihedrals = Interactions.get_dihedrals(angles, neibs, special_types)
+            else:
+                special_dihedrals = dict()
+        else:
+            special_angles = dict()
+            special_dihedrals = dict()
+        
+        inters['special_connectivity'] = Interactions.inverse_dictToArraykeys(special_connectivity)
+        inters['special_vdw'] = Interactions.inverse_dictToArraykeys(special_vdw)
+        inters['special_angles'] = Interactions.inverse_dictToArraykeys(special_angles)
+        inters['special_dihedrals'] = Interactions.inverse_dictToArraykeys(special_dihedrals)
+        
         if self.find_densities:
            # print(at_types)
             rhos = Interactions.get_rho_pairs(bond_d_matrix,at_types,self.vdw_bond_dist)
+            special_rhos = Interactions.get_rho_pairs(bond_d_matrix, special_types, self.vdw_bond_dist)
         else:
             rhos = dict()
+            special_rhos = dict()
         inters['rhos'] = rhos
+        inters['special_rhos'] = special_rhos
+        
         if self.atom_model.lower() in ['ua','united-atom','united_atom']:    
             inters = Interactions.clean_hydro_inters(inters)
             
@@ -7057,6 +7126,70 @@ class Interactions():
         dataframe['bodies'] = all_bodies
         dataframe['structs'] = all_structs
         return
+    
+    def print_interaction_info(self, i, category, v='all'):
+        """Print interaction types and their sizes for a given configuration.
+        
+        Parameters
+        ----------
+        i : int
+            iloc index of the configuration in self.data
+        category : str
+            Interaction category to display. Options:
+            'connectivity', 'vdw', 'angles', 'dihedrals', 'rhos',
+            'special_connectivity', 'special_vdw', 'special_angles', 
+            'special_dihedrals', 'special_rhos', or 'all' for all categories.
+        v : str
+            Filter for which types to show:
+            - 'all': show both basic and special types (default)
+            - 'basic': show only basic types (connectivity, vdw, angles, dihedrals, rhos)
+            - 'special': show only special types (special_connectivity, etc.)
+        """
+        inters = self.data.iloc[i]['interactions']
+        
+        basic_categories = ['connectivity', 'vdw', 'angles', 'dihedrals', 'rhos']
+        special_categories = ['special_connectivity', 'special_vdw', 'special_angles', 
+                              'special_dihedrals', 'special_rhos']
+        
+        # Determine which categories to show
+        if category == 'all':
+            if v == 'all':
+                categories_to_show = basic_categories + special_categories
+            elif v == 'basic':
+                categories_to_show = basic_categories
+            elif v == 'special':
+                categories_to_show = special_categories
+            else:
+                raise ValueError(f"v must be 'all', 'basic', or 'special', got '{v}'")
+        else:
+            # Single category specified
+            if v == 'basic' and category.startswith('special_'):
+                print(f"Category '{category}' is a special type but v='basic' was specified.")
+                return
+            elif v == 'special' and not category.startswith('special_'):
+                print(f"Category '{category}' is a basic type but v='special' was specified.")
+                return
+            categories_to_show = [category]
+        
+        print(f"\n{'='*60}")
+        print(f"Interaction Info for iloc={i} (v='{v}')")
+        print(f"{'='*60}")
+        
+        for cat in categories_to_show:
+            if cat not in inters:
+                continue
+            cat_data = inters[cat]
+            if not cat_data:
+                print(f"\n{cat}: (empty)")
+                continue
+                
+            total_pairs = sum(len(pairs) for pairs in cat_data.values())
+            print(f"\n{cat}: {len(cat_data)} types, {total_pairs} total pairs")
+            print("-" * 40)
+            for typ, pairs in cat_data.items():
+                print(f"  {typ}: {len(pairs)} pairs")
+        
+        print(f"\n{'='*60}\n")
     
     @staticmethod
     def activation_function_illustration(r0,rc):
@@ -7233,8 +7366,11 @@ class Interactions():
                             continue
                         if t not in potential_types[intertype]:
                             continue
+                    
+                    # Map special_types to their base intertype for calculation logic
+                    base_intertype = intertype.replace('special_', '') if intertype.startswith('special_') else intertype
                    
-                    if intertype in ['connectivity','vdw']:
+                    if base_intertype in ['connectivity','vdw']:
                         
                         npairs = len(pairs) 
                         
@@ -7262,7 +7398,7 @@ class Interactions():
                         temp = {'values':r, 'partial_ri':partial_ri,
                                 'i_index':i_index,'j_index':j_index}
                         
-                    elif intertype=='angles':
+                    elif base_intertype=='angles':
                         npairs = len(pairs) 
                         
                         angles  = np.empty(npairs, dtype=float)
@@ -7294,7 +7430,7 @@ class Interactions():
                                 'i_index':i_index, 'j_index':j_index,
                                 'k_index': k_index}
                     
-                    elif intertype =='dihedrals':
+                    elif base_intertype =='dihedrals':
                         
                         npairs = len(pairs) 
                         
@@ -7340,7 +7476,7 @@ class Interactions():
                                 'i_index':i_index, 'j_index':j_index,
                                 'k_index': k_index, 'l_index': l_index}
                         
-                    elif intertype=='rhos':
+                    elif base_intertype=='rhos':
                         r0 = self.rho_r0
                         rc = self.rho_rc
                         
@@ -7406,14 +7542,20 @@ class Interactions():
             Dictionary mapping feature (intertype) to set of types used in potential.
             E.g., {'vdw': {('Ag', 'Ag'), ('O', 'O')}, 'angles': {('H', 'O', 'H')}, ...}
             All intertypes are included, even if empty.
+            Includes both regular and special_types interactions.
         """
-        # Initialize all intertypes with empty sets
+        # Initialize all intertypes with empty sets (including special_types)
         potential_types = {
             'connectivity': set(),
             'vdw': set(),
             'angles': set(),
             'dihedrals': set(),
-            'rhos': set()
+            'rhos': set(),
+            'special_connectivity': set(),
+            'special_vdw': set(),
+            'special_angles': set(),
+            'special_dihedrals': set(),
+            'special_rhos': set()
         }
         
         # Try opt_models first, then init_models
@@ -7482,8 +7624,11 @@ class Interactions():
                             continue
                         if t not in potential_types[intertype]:
                             continue
+                    
+                    # Map special_types to their base intertype for calculation logic
+                    base_intertype = intertype.replace('special_', '') if intertype.startswith('special_') else intertype
                    
-                    if intertype in ['connectivity','vdw']:
+                    if base_intertype in ['connectivity','vdw']:
                         
                         # Vectorized bond calculation
                         pairs_arr = np.array(pairs, dtype=int)
@@ -7499,7 +7644,7 @@ class Interactions():
                         temp = {'values':r, 'partial_ri':partial_ri,
                                 'i_index':i_index,'j_index':j_index}
                         
-                    elif intertype=='angles':
+                    elif base_intertype=='angles':
                         
                         # Vectorized angle calculation
                         pairs_arr = np.array(pairs, dtype=int)
@@ -7517,7 +7662,7 @@ class Interactions():
                                 'i_index':i_index, 'j_index':j_index,
                                 'k_index': k_index}
                     
-                    elif intertype =='dihedrals':
+                    elif base_intertype =='dihedrals':
                         
                         # Vectorized dihedral calculation
                         pairs_arr = np.array(pairs, dtype=int)
@@ -7537,7 +7682,7 @@ class Interactions():
                                 'i_index':i_index, 'j_index':j_index,
                                 'k_index': k_index, 'l_index': l_index}
                         
-                    elif intertype=='rhos':
+                    elif base_intertype=='rhos':
                         r0 = self.rho_r0
                         rc = self.rho_rc
                         c = self.compute_coeff(r0, rc)
