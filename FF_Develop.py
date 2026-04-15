@@ -6175,20 +6175,24 @@ class Setup_Interfacial_Optimization():
                 inter = tuple(inter)
             self.type = inter
             
+            # Detect if this is a special_type model (types contain '--')
+            is_special = any('--' in str(t) for t in inter)
+            special_prefix = 'special_' if is_special else ''
+            
             if 'PW' == self.category:
-                self.feature = 'vdw'
+                self.feature = special_prefix + 'vdw'
                 self.lammps_class = 'pair'
             elif 'LD' == self.category:
-                self.feature =  'rhos'
+                self.feature = special_prefix + 'rhos'
                 self.lammps_class = 'pair'
             elif 'BO' == self.category:
-                self.feature = 'connectivity'
+                self.feature = special_prefix + 'connectivity'
                 self.lammps_class = 'bond'
             elif 'AN' == self.category:
-                self.feature = 'angles'
+                self.feature = special_prefix + 'angles'
                 self.lammps_class ='angle'
             elif 'DI' == self.category:
-                self.feature ='dihedrals'
+                self.feature = special_prefix + 'dihedrals'
                 self.lammps_class = 'dihedral'
                 
             for j,line in enumerate(lines):
