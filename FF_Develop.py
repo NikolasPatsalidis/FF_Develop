@@ -6835,6 +6835,38 @@ class Interactions():
         return special_types
     
     @staticmethod
+    def get_base_type_from_special(special_type_tuple):
+        """Extract base atom types from a special type tuple.
+        
+        Examples:
+            ('C--CHHH', 'C--CHHN') -> ('C', 'C')
+            ('H--C', 'C--CHHH', 'H--N') -> ('C', 'H', 'H')  # sorted
+        
+        Parameters
+        ----------
+        special_type_tuple : tuple
+            Tuple of special type strings (e.g., ('C--CHHH', 'H--C'))
+            
+        Returns
+        -------
+        tuple
+            Tuple of base atom types, canonically sorted.
+        """
+        base_types = [st.split('--')[0] for st in special_type_tuple]
+        # Use the same sorting logic as sorted_id_and_type
+        if base_types[0] <= base_types[-1]:
+            reverse = False
+            if len(base_types) == 4:
+                if base_types[2] < base_types[1] and base_types[0] == base_types[-1]:
+                    reverse = True
+        else:
+            reverse = True
+        
+        if reverse:
+            return tuple(base_types[::-1])
+        return tuple(base_types)
+    
+    @staticmethod
     def get_itypes(model,at_types,bonds,neibs):
         """Get interaction types based on atom model (AA or UA)."""
         logger.debug('atom model = {:s}'.format(model))
@@ -7058,16 +7090,33 @@ class Interactions():
         
         # Create special_type interactions using the SAME bond pairs as at_type connectivity
         # but with special_types labels (re-label existing connectivity pairs)
-        special_connectivity = Interactions.get_connectivity(Bonds,special_types, self.excludedBondtypes)
+        # NOTE: We iterate over connectivity (which already has at_type exclusions applied)
+        # and re-label with special_types to ensure pair counts match
+        # Re-label connectivity pairs with special_types
+        special_connectivity = {}
+        for pair_ids, at_type_label in connectivity.items():
+            _, special_label = Interactions.sorted_id_and_type(special_types, pair_ids)
+            special_connectivity[pair_ids] = special_label
         
-        special_vdw = Interactions.get_vdw(special_types, bond_d_matrix, self.find_vdw_connected,
-                      self.find_vdw_unconnected, self.vdw_bond_dist)
+        # Re-label vdw pairs with special_types
+        special_vdw = {}
+        for pair_ids, at_type_label in vdw.items():
+            _, special_label = Interactions.sorted_id_and_type(special_types, pair_ids)
+            special_vdw[pair_ids] = special_label
         
         if self.find_angles or self.find_dihedrals:
-            # Use the at_type connectivity for finding angles, but label with special_types
-            special_angles = Interactions.get_angles(connectivity, neibs, special_types)
+            # Re-label angle triples with special_types
+            special_angles = {}
+            for triple_ids, at_type_label in angles.items():
+                _, special_label = Interactions.sorted_id_and_type(special_types, triple_ids)
+                special_angles[triple_ids] = special_label
+            
             if self.find_dihedrals:
-                special_dihedrals = Interactions.get_dihedrals(angles, neibs, special_types)
+                # Re-label dihedral quadruplets with special_types
+                special_dihedrals = {}
+                for quad_ids, at_type_label in dihedrals.items():
+                    _, special_label = Interactions.sorted_id_and_type(special_types, quad_ids)
+                    special_dihedrals[quad_ids] = special_label
             else:
                 special_dihedrals = dict()
         else:
@@ -7078,6 +7127,32 @@ class Interactions():
         inters['special_vdw'] = Interactions.inverse_dictToArraykeys(special_vdw)
         inters['special_angles'] = Interactions.inverse_dictToArraykeys(special_angles)
         inters['special_dihedrals'] = Interactions.inverse_dictToArraykeys(special_dihedrals)
+        
+        # Assertion: verify special_types pair counts match base types
+        def verify_special_vs_base(base_dict, special_dict, category):
+            base_total = sum(len(v) for v in base_dict.values())
+            special_total = sum(len(v) for v in special_dict.values())
+            assert base_total == special_total, \
+                f"{category}: base total ({base_total}) != special total ({special_total})"
+            
+            # Also verify that special types map back correctly to base types
+            base_from_special = {}
+            for special_type, pairs in special_dict.items():
+                base_type = Interactions.get_base_type_from_special(special_type)
+                if base_type not in base_from_special:
+                    base_from_special[base_type] = 0
+                base_from_special[base_type] += len(pairs)
+            
+            for base_type, count in base_dict.items():
+                expected = len(count)
+                actual = base_from_special.get(base_type, 0)
+                assert expected == actual, \
+                    f"{category}: base type {base_type} has {expected} pairs but special mapped {actual}"
+        
+        verify_special_vs_base(inters['connectivity'], inters['special_connectivity'], 'connectivity')
+        verify_special_vs_base(inters['vdw'], inters['special_vdw'], 'vdw')
+        verify_special_vs_base(inters['angles'], inters['special_angles'], 'angles')
+        verify_special_vs_base(inters['dihedrals'], inters['special_dihedrals'], 'dihedrals')
         
         if self.find_densities:
            # print(at_types)
