@@ -7645,7 +7645,7 @@ class Interactions():
         for name, model in models.items():
             feature = model.feature
             ty = model.type
-            print(name, feature, ty)
+            #print('potential_type:', name, feature, ty)
             potential_types[feature].add(ty)
         
         return potential_types
