@@ -10977,7 +10977,7 @@ class measures:
         return 2 *  weights * u / u2.size
     
     @staticmethod
-    def sMSE(u1, u2, w=1, lam=0.1):
+    def sMSE(u1, u2, w=1, lam=0.3):
         """Symmetric MSE with skewness penalty to encourage Gaussian errors.
         
         Loss = MSE + λ * skewness²
@@ -10991,7 +10991,7 @@ class measures:
         w : float or array
             Weights (default 1)
         lam : float
-            Skewness penalty weight (default 0.1)
+            Skewness penalty weight (default 0.3)
         """
         u = u1 - u2
         n = u.size
@@ -11005,7 +11005,7 @@ class measures:
         return mse + lam * skew**2
     
     @staticmethod
-    def grad_sMSE(u1, u2, w=1, lam=0.1):
+    def grad_sMSE(u1, u2, w=1, lam=0.3):
         """Gradient of symmetric MSE with skewness penalty.
         
         d/du1 [MSE + λ * skew²]
