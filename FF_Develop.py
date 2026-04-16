@@ -10949,7 +10949,7 @@ class measures:
         return np.sum(w*u*u)/u2.size
     
     @staticmethod
-    def aMSE(u1, u2, w=1, alpha=4.0):
+    def aMSE(u1, u2, w=1):
         """Asymmetric MSE that penalizes underprediction more.
         
         When u1 < u2 (prediction < true): error is scaled by alpha.
@@ -10963,20 +10963,17 @@ class measures:
             True values (Energy)
         w : float or array
             Weights (default 1)
-        alpha : float
-            Penalty factor for underprediction. alpha > 1 penalizes 
-            underprediction more. Default 2.0.
         """
         u = u1 - u2
         # Where prediction < true (underfitting), apply alpha penalty
-        weights = np.where(u < 0, alpha, 1.0)
+        weights = np.where(u < 0, 4, 1.0)
         return np.sum(w * weights * u * u) / u2.size
     
     @staticmethod
-    def grad_aMSE(u1, u2, w=1, alpha=2.0):
+    def grad_aMSE(u1, u2, w=1):
         """Gradient of asymmetric MSE."""
         u = u1 - u2
-        weights = np.where(u < 0, alpha, 1.0)
+        weights = np.where(u < 0, 4, 1.0)
         return 2 * w * weights * u / u2.size
     
     @staticmethod
