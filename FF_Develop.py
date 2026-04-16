@@ -10966,15 +10966,15 @@ class measures:
         """
         u = u1 - u2
         # Where prediction < true (underfitting), apply alpha penalty
-        weights = np.where(u < 0, 4, 1.0)
-        return np.sum(w * weights * u * u) / u2.size
+        weights = np.where(u > 0, w, 4.0)
+        return np.sum(weights * u * u) / u2.size
     
     @staticmethod
     def grad_aMSE(u1, u2, w=1):
         """Gradient of asymmetric MSE."""
         u = u1 - u2
-        weights = np.where(u < 0, 4, 1.0)
-        return 2 * w * weights * u / u2.size
+        weights = np.where(u > 0, w, 4.0)
+        return 2 *  weights * u / u2.size
     
     @staticmethod
     def MSEo(u1,u2,w=1):
