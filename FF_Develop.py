@@ -10977,6 +10977,71 @@ class measures:
         return 2 *  weights * u / u2.size
     
     @staticmethod
+    def sMSE(u1, u2, w=1, lam=0.1):
+        """Symmetric MSE with skewness penalty to encourage Gaussian errors.
+        
+        Loss = MSE + λ * skewness²
+        
+        Parameters
+        ----------
+        u1 : array
+            Predicted values (Uclass)
+        u2 : array
+            True values (Energy)
+        w : float or array
+            Weights (default 1)
+        lam : float
+            Skewness penalty weight (default 0.1)
+        """
+        u = u1 - u2
+        n = u.size
+        mse = np.sum(w * u * u) / n
+        
+        # Compute skewness: E[(u - mean)³] / std³
+        mean_u = np.mean(u)
+        std_u = np.std(u) + 1e-8  # avoid division by zero
+        skew = np.mean((u - mean_u)**3) / (std_u**3)
+        
+        return mse + lam * skew**2
+    
+    @staticmethod
+    def grad_sMSE(u1, u2, w=1, lam=0.1):
+        """Gradient of symmetric MSE with skewness penalty.
+        
+        d/du1 [MSE + λ * skew²]
+        """
+        u = u1 - u2
+        n = u.size
+        
+        # MSE gradient
+        grad_mse = 2 * w * u / n
+        
+        # Skewness gradient
+        mean_u = np.mean(u)
+        std_u = np.std(u) + 1e-8
+        centered = u - mean_u
+        m3 = np.mean(centered**3)
+        skew = m3 / (std_u**3)
+        
+        # d(skew)/du = d/du [m3 / std³]
+        # m3 = mean(centered³), std² = mean(centered²)
+        # Using chain rule:
+        # d(m3)/du_i = 3*centered_i² * (1/n - 1/n) + 3*centered_i²/n = 3*centered_i²/n (approx)
+        # Full derivative accounting for mean shift:
+        dm3_du = 3 * centered**2 / n - 3 * np.mean(centered**2) / n
+        
+        # d(std³)/du = 3*std² * d(std)/du = 3*std² * centered/(n*std) = 3*std*centered/n
+        dstd3_du = 3 * std_u**2 * centered / (n * std_u)
+        
+        # d(skew)/du = (dm3*std³ - m3*dstd3) / std⁶
+        dskew_du = (dm3_du * std_u**3 - m3 * dstd3_du) / (std_u**6)
+        
+        # d(skew²)/du = 2*skew*dskew_du
+        grad_skew_penalty = 2 * skew * dskew_du
+        
+        return grad_mse + lam * grad_skew_penalty
+    
+    @staticmethod
     def MSEo(u1,u2,w=1):
         """Mean squared error."""
         u = u1 -u2
