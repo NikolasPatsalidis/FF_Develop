@@ -13,8 +13,24 @@ def main():
     costs_file = sys.argv[1]
     predict_file = sys.argv[2]
     
-    df_costs = pd.read_csv(costs_file)
-    df_predict = pd.read_csv(predict_file)
+    # Read only the columns we need (handles CSVs where columns were added mid-run)
+    needed_cols = ['iteration', 'MAE_train_energy', 'MAE_train_forces', 'MAE_dev_energy', 'MAE_dev_forces']
+    
+    # First, determine the max number of columns in the file
+    with open(costs_file, 'r') as f:
+        max_cols = max(len(line.split(',')) for line in f)
+    df_costs = pd.read_csv(costs_file, names=range(max_cols), header=0)
+    # Re-read with proper header to get column names
+    with open(costs_file, 'r') as f:
+        header = f.readline().strip().split(',')
+    df_costs.columns = header + [f'extra_{i}' for i in range(len(df_costs.columns) - len(header))]
+    
+    with open(predict_file, 'r') as f:
+        max_cols_pred = max(len(line.split(',')) for line in f)
+    df_predict = pd.read_csv(predict_file, names=range(max_cols_pred), header=0)
+    with open(predict_file, 'r') as f:
+        header_pred = f.readline().strip().split(',')
+    df_predict.columns = header_pred + [f'extra_{i}' for i in range(len(df_predict.columns) - len(header_pred))]
     
     iterations = df_costs.iloc[:, 0].values
     
