@@ -48,6 +48,7 @@ import six
 import ase
 
 import lammpsreader as lammps_reader
+from qe_io import mass_map as ATOMIC_MASSES
 
 @njit(parallel=True, cache=True)
 def _sum_energy_segments(U, dl, du, data_size):
@@ -1195,28 +1196,35 @@ class al_help():
         return optimizer
 
     @staticmethod
-    def get_lammps_maps(data_point,parsed_args):
-        """Build LAMMPS mapping dictionaries from a data point and CLI args.
+    def get_lammps_maps(data_point, parsed_args=None):
+        """Build LAMMPS mapping dictionaries from a data point.
+
+        Uses atomic masses from periodic table (ATOMIC_MASSES) and defaults
+        charges to 0. The parsed_args parameter is deprecated and ignored.
+
+        Parameters
+        ----------
+        data_point : pandas.Series or dict
+            Data point containing 'at_type' field.
+        parsed_args : object, optional
+            Deprecated. Previously used for charge_map and mass_map.
+            Now ignored - masses come from periodic table, charges default to 0.
 
         Returns
         -------
         dict
             Contains `types_map`, `mass_map`, and `charge_map` for LAMMPS I/O.
         """
-        maps= dict()
-        maps['types_map'] = { k:j+1 for j,k in enumerate(np.unique(data_point['at_type'])) }
+        maps = dict()
+        atom_types = np.unique(data_point['at_type'])
+        maps['types_map'] = {k: j+1 for j, k in enumerate(atom_types)}
         
-        for name in ['mass_map','charge_map']:
-            a = getattr(parsed_args,name)
-            a = a.split(',')
-            #print(a)
-            d = dict()
-            for j in a:
-                l = j.split(':')
-                k = str(l[0])
-                v = float(l[1]) 
-                d[k]=v
-            maps[name] = d
+        # Use atomic masses from periodic table
+        maps['mass_map'] = {t: ATOMIC_MASSES.get(t, 1.0) for t in atom_types}
+        
+        # Default charges to 0
+        maps['charge_map'] = {t: 0.0 for t in atom_types}
+        
         return maps
 
     @staticmethod

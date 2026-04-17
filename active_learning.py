@@ -118,8 +118,6 @@ class ActiveLearningConfig(ConfigBase):
         'perturbation_iterations': 0,         # iterations 0 to this use perturbation
         'mc_iterations': 9,                   # iterations up to this use MC
         'fixed_types': [],
-        'charge_map': '',
-        'mass_map': '',
         # MC sampling parameters
         'max_mc_steps': 4000,                # maximum MC steps per system
         'max_mc_candidates': 10000,   # maximum candidate configs per system
@@ -733,20 +731,8 @@ class ActiveLearningPipeline:
         candidate_data : pd.DataFrame
             Sampled configurations from MD trajectories.
         """
-        # Parse mass map from config
-        mass_map = self._parse_map_string(self.al_config.mass_map)
-        
-        # Add default masses for common elements if not specified
-        default_masses = {
-            'H': 1.008, 'C': 12.011, 'N': 14.007, 'O': 15.999,
-            'S': 32.065, 'P': 30.974, 'F': 18.998, 'Cl': 35.453,
-            'Br': 79.904, 'I': 126.90, 'Si': 28.086, 'B': 10.811,
-            'Ag': 107.868, 'Au': 196.967, 'Cu': 63.546, 'Fe': 55.845,
-            'Zn': 65.38, 'Pt': 195.084, 'Pd': 106.42, 'Ni': 58.693,
-        }
-        for elem, mass in default_masses.items():
-            if elem not in mass_map:
-                mass_map[elem] = mass
+        # Use atomic masses from periodic table (qe_io.mass_map)
+        mass_map = qe_io.mass_map
         
         # Create Langevin dynamics integrator with fixed atom types
         fixed_types = self.al_config.fixed_types
@@ -1338,9 +1324,9 @@ def generate_template_files(output_dir='.'):
     dft_config = DFTConfig()
     dft_config.to_file(os.path.join(output_dir, 'dft.in'))
     
-    # Methodology template
+    # Methodology template (Water/Ag example system)
     methodology_template = """# Methodology/Training Parameters
-# Generated template - modify as needed
+# Generated template - Water/Ag interfacial system example
 
 representation  = AA
 storing_path    = Results_al
@@ -1407,9 +1393,9 @@ nDI             = 2
 rho_r0          = 0.1
 rho_rc          = 5.5
 
-distance_map    = {('C', 'H'): (0.0, 1.2), ('N', 'H'): (0, 1.2)}
+distance_map    = {('O', 'H'): (0.0, 1.2)}
 reference_energy = {'value': 0.0}
-struct_types    = [('Ag',), ('C', 'H', 'N')]
+struct_types    = [('Ag',), ('O', 'H')]
 rigid_types     = []
 perturbation_method = atoms
 lammps_potential_extra_lines = ['']
@@ -1420,28 +1406,61 @@ not_optimize_force_for = []
     with open(os.path.join(output_dir, 'training.in'), 'w') as f:
         f.write(methodology_template)
     
-    # Potential template
+    # Potential template (Water/Ag example system)
     potential_template = """# Potential Model Definitions
-# Generated template - modify as needed
+# Generated template - Water/Ag interfacial system example
 # Each model starts with &NAME and ends with /
+# Parameter format: value  optimize(0/1)  lower_bound  upper_bound  regularization
 
-&PW0 Ag C
+# === Water-Silver Interactions (Pairwise) ===
+
+&PW0 Ag O
 FUNC LJ
-sigma      : 3.0000000000000  1  0.20000  4.00000    0.00000
-epsilon    : 0.5000000000000  1  0.00010  450.00000  0.00000
+sigma      : 2.8000000000000  1  2.00000  4.00000    0.00000
+epsilon    : 0.3000000000000  1  0.00010  5.00000    0.00000
 /
 
 &PW0 Ag H
 FUNC LJ
-sigma      : 2.5000000000000  1  0.00100  4.00000    0.00000
-epsilon    : 0.2000000000000  1  0.00000  450.00000  0.00000
+sigma      : 2.4000000000000  1  1.50000  4.00000    0.00000
+epsilon    : 0.1000000000000  1  0.00010  2.00000    0.00000
 /
 
-&BO0 C H
-FUNC MorseBond
-re         : 1.1000000000000  1  1.00000  4.00000    0.00000
-De         : 1.0000000000000  1  0.00000  450.00000  0.00000
-alpha      : 2.0000000000000  1  0.00010  7.00000    0.00000
+# === Water Intramolecular (Pairwise at long range) ===
+
+&PW0 O O
+FUNC LJ
+sigma      : 3.1660000000000  1  2.50000  4.00000    0.00000
+epsilon    : 0.1550000000000  1  0.00010  1.00000    0.00000
+/
+
+&PW0 O H
+FUNC LJ
+sigma      : 1.7750000000000  1  1.00000  3.00000    0.00000
+epsilon    : 0.0836000000000  1  0.00010  0.50000    0.00000
+/
+
+&PW0 H H
+FUNC LJ
+sigma      : 0.4000000000000  1  0.10000  2.00000    0.00000
+epsilon    : 0.0460000000000  1  0.00010  0.50000    0.00000
+/
+
+# === Water O-H Bond ===
+
+&BO0 O H
+FUNC Morse
+re         : 0.9572000000000  1  0.80000  1.20000    0.00000
+De         : 100.0000000000000  1  50.00000  200.00000  1.00000
+alpha      : 2.2870000000000  1  1.00000  5.00000    0.00000
+/
+
+# === Water H-O-H Angle ===
+
+&AN0 H O H
+FUNC harmonic
+th0        : 1.8242000000000  1  1.50000  2.20000    0.00000
+k          : 45.0000000000000  1  20.00000  100.00000  1.00000
 /
 
 """
