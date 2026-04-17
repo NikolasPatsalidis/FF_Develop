@@ -13,24 +13,40 @@ def main():
     costs_file = sys.argv[1]
     predict_file = sys.argv[2]
     
-    # Read only the columns we need (handles CSVs where columns were added mid-run)
-    needed_cols = ['iteration', 'MAE_train_energy', 'MAE_train_forces', 'MAE_dev_energy', 'MAE_dev_forces']
+    def read_variable_csv(filepath):
+        """Read CSV with variable column counts."""
+        with open(filepath, 'r') as f:
+            lines = f.readlines()
+        
+        # Parse header
+        header = lines[0].strip().split(',')
+        
+        # Find max columns
+        max_cols = max(len(line.split(',')) for line in lines)
+        
+        # Extend header if needed
+        while len(header) < max_cols:
+            header.append(f'extra_{len(header)}')
+        
+        # Parse data rows
+        data = []
+        for line in lines[1:]:
+            row = line.strip().split(',')
+            # Pad row if needed
+            while len(row) < max_cols:
+                row.append('')
+            data.append(row[:max_cols])  # Truncate if too long
+        
+        return pd.DataFrame(data, columns=header)
     
-    # First, determine the max number of columns in the file
-    with open(costs_file, 'r') as f:
-        max_cols = max(len(line.split(',')) for line in f)
-    df_costs = pd.read_csv(costs_file, names=range(max_cols), header=0)
-    # Re-read with proper header to get column names
-    with open(costs_file, 'r') as f:
-        header = f.readline().strip().split(',')
-    df_costs.columns = header + [f'extra_{i}' for i in range(len(df_costs.columns) - len(header))]
+    df_costs = read_variable_csv(costs_file)
+    df_predict = read_variable_csv(predict_file)
     
-    with open(predict_file, 'r') as f:
-        max_cols_pred = max(len(line.split(',')) for line in f)
-    df_predict = pd.read_csv(predict_file, names=range(max_cols_pred), header=0)
-    with open(predict_file, 'r') as f:
-        header_pred = f.readline().strip().split(',')
-    df_predict.columns = header_pred + [f'extra_{i}' for i in range(len(df_predict.columns) - len(header_pred))]
+    # Convert numeric columns
+    for col in ['MAE_train_energy', 'MAE_train_forces', 'MAE_dev_energy', 'MAE_dev_forces']:
+        df_costs[col] = pd.to_numeric(df_costs[col], errors='coerce')
+        if col in df_predict.columns:
+            df_predict[col] = pd.to_numeric(df_predict[col], errors='coerce')
     
     iterations = df_costs.iloc[:, 0].values
     
