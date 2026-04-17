@@ -10825,7 +10825,7 @@ class FF_Optimizer(Optimizer):
              measure_reg,
              force_filter) = args
 
-            for meas in np.unique(['MAE','MSE',measure]):
+            for meas in np.unique(['MAE', measure]):  # Only log MAE and the actual costf (not MSE by default)
                 for norm in ['','norm_']:
                     if normalize and norm =='norm_':
                         mu_e, std_e, mu_f, std_f = self.get_normalized_data(dataname) # IT GIVES BY DEFAULT train data mu, std but indexing refers to dataname (To have combatiple arrays)
