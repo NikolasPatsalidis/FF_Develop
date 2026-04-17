@@ -48,7 +48,14 @@ def main():
         if col in df_predict.columns:
             df_predict[col] = pd.to_numeric(df_predict[col], errors='coerce')
     
-    iterations = df_costs.iloc[:, 0].values
+    # Get iteration column (first column) - handle independently for each file
+    iter_col = df_costs.columns[0]
+    df_costs[iter_col] = pd.to_numeric(df_costs[iter_col], errors='coerce')
+    iterations_costs = df_costs[iter_col].values
+    
+    iter_col_pred = df_predict.columns[0]
+    df_predict[iter_col_pred] = pd.to_numeric(df_predict[iter_col_pred], errors='coerce')
+    iterations_pred = df_predict[iter_col_pred].values
     
     # From COSTS.csv
     train_energy = df_costs['MAE_train_energy'].values
@@ -66,9 +73,9 @@ def main():
     ax1.set_xlabel('AL Iteration', fontsize=10)
     ax1.set_ylabel('MAE Energy (kcal/mol)', fontsize=10, color='dimgray')
     ax1.grid(True, alpha=0.3, linestyle='--')
-    ax1.plot(iterations, train_energy, '-', marker='o', fillstyle='none', color='silver', label='Train E', markersize=4)
-    ax1.plot(iterations, dev_energy, '--', marker='s', fillstyle='none', color='gray', label='Dev E', markersize=4)
-    ax1.plot(iterations, pred_energy, ':', marker='^', fillstyle='none', color='black', label='Pred E', markersize=4)
+    ax1.plot(iterations_costs, train_energy, '-', marker='o', fillstyle='none', color='silver', label='Train E', markersize=4)
+    ax1.plot(iterations_costs, dev_energy, '--', marker='s', fillstyle='none', color='gray', label='Dev E', markersize=4)
+    ax1.plot(iterations_pred, pred_energy, ':', marker='^', fillstyle='none', color='black', label='Pred E', markersize=4)
     ax1.tick_params(axis='y', labelcolor='dimgray')
     ax1.set_yscale('log')    
     ax1.legend(loc='upper center', frameon=False, fontsize=7)
@@ -76,9 +83,9 @@ def main():
     # Right y-axis: MAE Forces (red scale: light to dark)
     ax2 = ax1.twinx()
     ax2.set_ylabel('MAE Forces (kcal/mol/Å)', fontsize=10, color='darkred')
-    ax2.plot(iterations, train_forces, '-', marker='o', color='lightcoral', label='Train F', markersize=6)
-    ax2.plot(iterations, dev_forces, '--', marker='s', color='indianred', label='Dev F', markersize=6)
-    ax2.plot(iterations, pred_forces, ':', marker='^', color='darkred', label='Pred F', markersize=6)
+    ax2.plot(iterations_costs, train_forces, '-', marker='o', color='lightcoral', label='Train F', markersize=6)
+    ax2.plot(iterations_costs, dev_forces, '--', marker='s', color='indianred', label='Dev F', markersize=6)
+    ax2.plot(iterations_pred, pred_forces, ':', marker='^', color='darkred', label='Pred F', markersize=6)
     ax2.tick_params(axis='y', labelcolor='darkred')
     ax2.legend(loc='upper right', frameon=False, fontsize=7)
     
