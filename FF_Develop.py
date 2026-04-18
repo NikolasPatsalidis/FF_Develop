@@ -5780,6 +5780,7 @@ class Setup_Interfacial_Optimization():
         'opt_disp':True,
         'optimize':True,
         'costf':'MSE',
+        'costf_params':{},  # Measure-specific hyperparameters, e.g., {'lam': 0.3} for sMSE
         
         'training_method':'scan_force_error',
          'random_initializations': 2,
@@ -9484,14 +9485,17 @@ class FF_Optimizer(Optimizer):
                      reg, reguls,
                      measure,reg_measure,
                      force_filter=None,
-                     mu_e =0.0, std_e=1.0,
+                     measure_params=None,
+                     mu_e = 0.0, std_e=1.0,
                      mu_f = 0.0, std_f=1.0,
                      weights=None):
         """Compute total cost combining energy, force, and regularization terms."""
         
-        cE = CostFunctions.Energy(params, Energy, models_list_info, measure, mu_e,std_e, weights)
+        if measure_params is None:
+            measure_params = {}
+        cE = CostFunctions.Energy(params, Energy, models_list_info, measure, mu_e,std_e, weights, measure_params)
         cR = reg*CostFunctions.Regularization(params,reguls,reg_measure) 
-        cF = CostFunctions.Forces(params, Forces, models_list_info, measure, mu_f,std_f, force_filter) 
+        cF = CostFunctions.Forces(params, Forces, models_list_info, measure, mu_f,std_f, force_filter, measure_params) 
         cost = (1.0-lambda_force)*cE + lambda_force*cF + cR
         return cost
     
@@ -9501,13 +9505,16 @@ class FF_Optimizer(Optimizer):
                 reg,reguls,
                 measure,reg_measure,
                 force_filter=None,
+                measure_params=None,
                 mu_e =0.0, std_e=1.0,
                 mu_f = 0.0, std_f=1.0,
                 weights=None):
         """Compute gradient of total cost w.r.t. parameters."""
-        gradE = CostFunctions.gradEnergy(params, Energy, models_list_info, measure, mu_e,std_e, weights)
+        if measure_params is None:
+            measure_params = {}
+        gradE = CostFunctions.gradEnergy(params, Energy, models_list_info, measure, mu_e,std_e, weights, measure_params)
         gradR = reg*CostFunctions.gradRegularization(params,reguls,reg_measure) 
-        gradF = CostFunctions.gradForces(params, Forces, models_list_info, measure, mu_f,std_f, force_filter) 
+        gradF = CostFunctions.gradForces(params, Forces, models_list_info, measure, mu_f,std_f, force_filter, measure_params) 
         grads =  (1.0-lambda_force)*gradE + lambda_force*gradF + gradR
         
         return grads
@@ -9947,7 +9954,8 @@ class FF_Optimizer(Optimizer):
                 self.setup.reg_par, reguls,
                 self.setup.costf,
                 self.setup.regularization_method,
-                force_filter)
+                force_filter,
+                self.setup.costf_params)
         
         if return_weights:
             # Compute weights for the requested dataset
@@ -9969,7 +9977,8 @@ class FF_Optimizer(Optimizer):
                  reg_par, reguls,
                  measure,
                  measure_reg,
-                 force_filter) = args
+                 force_filter,
+                 measure_params) = args
         
         normalize_data = self.setup.normalize_data
         if normalize_data:
@@ -10057,7 +10066,8 @@ class FF_Optimizer(Optimizer):
                  reg_par, reguls,
                  measure,
                  measure_reg,
-                 force_filter) = args
+                 force_filter,
+                 measure_params) = args
         
         args_energy = (Energy, models_list_info, reg_par, reguls, measure, measure_reg)
         #args_forces = (Forces, models_list_info, reg_par, reguls, measure, measure_reg)
@@ -10807,7 +10817,8 @@ class FF_Optimizer(Optimizer):
                  reg_par, reguls,
                  measure,
                  measure_reg,
-                 force_filter) = args
+                 force_filter,
+                 measure_params) = args
         
            
         normalize = self.setup.normalize_data
@@ -10823,9 +10834,12 @@ class FF_Optimizer(Optimizer):
              reg_par, reguls,
              measure,
              measure_reg,
-             force_filter) = args
+             force_filter,
+             measure_params) = args
 
             for meas in np.unique(['MAE', measure]):  # Only log MAE and the actual costf (not MSE by default)
+                # Only apply measure_params for the actual costf, not for MAE
+                meas_params = measure_params if meas == measure else {}
                 for norm in ['','norm_']:
                     if normalize and norm =='norm_':
                         mu_e, std_e, mu_f, std_f = self.get_normalized_data(dataname) # IT GIVES BY DEFAULT train data mu, std but indexing refers to dataname (To have combatiple arrays)
@@ -10833,8 +10847,8 @@ class FF_Optimizer(Optimizer):
                         mu_e, std_e, mu_f, std_f = 0.0, 1.0, 0.0, 1.0
                     
                     creg = CostFunctions.Regularization(params,reguls, measure_reg)
-                    ce = CostFunctions.Energy(params, Energy, models_list_info, meas, mu_e, std_e)
-                    cf = CostFunctions.Forces(params, Forces, models_list_info, meas, mu_f, std_f, force_filter)
+                    ce = CostFunctions.Energy(params, Energy, models_list_info, meas, mu_e, std_e, None, meas_params)
+                    cf = CostFunctions.Forces(params, Forces, models_list_info, meas, mu_f, std_f, force_filter, meas_params)
                     
                     prefix = norm + meas+'_'+dataname+'_' 
                     setattr(costs,prefix + 'energy',  ce)
@@ -11545,7 +11559,7 @@ class mappers():
 
 class CostFunctions():
     """Static methods for computing cost functions and their gradients."""
-    def Energy(params, Energy, models_list_info, measure, mu=0.0,std=1.0, weights=None):
+    def Energy(params, Energy, models_list_info, measure, mu=0.0,std=1.0, weights=None, measure_params=None):
         """Compute energy cost using the specified measure."""
         ne = Energy.shape[0]
         
@@ -11553,10 +11567,12 @@ class CostFunctions():
         
         func = getattr(measures,measure)
         w = 1 if weights is None else weights
-        ce = func(  (Uclass-mu)/std, (Energy-mu)/std, w )
+        if measure_params is None:
+            measure_params = {}
+        ce = func(  (Uclass-mu)/std, (Energy-mu)/std, w, **measure_params )
         return ce
     
-    def gradEnergy(params, Energy, models_list_info, measure, mu=0.0, std=1.0, weights=None):
+    def gradEnergy(params, Energy, models_list_info, measure, mu=0.0, std=1.0, weights=None, measure_params=None):
         """Compute gradient of energy cost w.r.t. parameters."""
         ne = Energy.shape[0]
         
@@ -11565,17 +11581,21 @@ class CostFunctions():
         
         func = getattr(measures,'grad_'+measure)
         w = 1 if weights is None else weights
-        grad = np.sum( func( (Uclass-mu)/std, (Energy-mu)/std, w ) * gradU/std, axis = 1)
+        if measure_params is None:
+            measure_params = {}
+        grad = np.sum( func( (Uclass-mu)/std, (Energy-mu)/std, w, **measure_params ) * gradU/std, axis = 1)
         
         return grad 
     
-    def Forces(params,Forces_True, models_list_info, measure, mu=0.0,std=1.0, force_filter=None):
+    def Forces(params,Forces_True, models_list_info, measure, mu=0.0,std=1.0, force_filter=None, measure_params=None):
         """Compute force cost using the specified measure.
         
         Parameters
         ----------
         force_filter : numpy.ndarray[bool], optional
             Boolean filter where True means include in cost calculation.
+        measure_params : dict, optional
+            Additional hyperparameters for the measure function.
         """
         n_forces = Forces_True.shape[0]
         
@@ -11587,16 +11607,20 @@ class CostFunctions():
             Forces_True = Forces_True[force_filter]
         
         func = getattr(measures,measure)
-        cf = func( (Forces-mu)/std, (Forces_True-mu)/std )
+        if measure_params is None:
+            measure_params = {}
+        cf = func( (Forces-mu)/std, (Forces_True-mu)/std, 1, **measure_params )
         return cf 
     
-    def gradForces(params,Forces_True, models_list_info, measure, mu=0.0, std=1.0, force_filter=None):
+    def gradForces(params,Forces_True, models_list_info, measure, mu=0.0, std=1.0, force_filter=None, measure_params=None):
         """Compute gradient of force cost w.r.t. parameters.
         
         Parameters
         ----------
         force_filter : numpy.ndarray[bool], optional
             Boolean filter where True means include in cost calculation.
+        measure_params : dict, optional
+            Additional hyperparameters for the measure function.
         """
         n_forces = Forces_True.shape[0]
         
@@ -11612,8 +11636,9 @@ class CostFunctions():
             Forces_True_filtered = Forces_True
         
         func = getattr(measures,'grad_'+measure)
-        
-        grad = np.sum( func( (Forces -mu)/std, (Forces_True_filtered-mu)/std ) * gradF/std, axis = (1,2) )
+        if measure_params is None:
+            measure_params = {}
+        grad = np.sum( func( (Forces -mu)/std, (Forces_True_filtered-mu)/std, 1, **measure_params ) * gradF/std, axis = (1,2) )
         return grad
     
     def Regularization(params,reguls,reg_measure):
