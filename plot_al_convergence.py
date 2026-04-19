@@ -23,33 +23,26 @@ def main():
     
     def read_variable_csv(filepath):
         """Read CSV with variable column counts."""
-        try:
-            # Try standard read first
-            return pd.read_csv(filepath, on_bad_lines='skip')
-        except Exception:
-            pass
+        from io import StringIO
         
-        # Fallback: manual parsing with dict construction
         with open(filepath, 'r') as f:
             lines = f.readlines()
         
-        header = lines[0].strip().split(',')
+        # Find max columns and pad all rows
         max_cols = max(len(line.split(',')) for line in lines)
-        
+        header = lines[0].strip().split(',')
         while len(header) < max_cols:
             header.append(f'extra_{len(header)}')
         
-        # Build column dict instead of 2D list
-        col_data = {h: [] for h in header}
+        # Rebuild CSV with consistent columns
+        new_lines = [','.join(header)]
         for line in lines[1:]:
             row = line.strip().split(',')
             while len(row) < max_cols:
                 row.append('')
-            row = row[:max_cols]
-            for i, h in enumerate(header):
-                col_data[h].append(row[i])
+            new_lines.append(','.join(row[:max_cols]))
         
-        return pd.DataFrame(col_data)
+        return pd.read_csv(StringIO('\n'.join(new_lines)))
     
     df_costs = read_variable_csv(costs_file)
     df_predict = read_variable_csv(predict_file) if predict_file else None
