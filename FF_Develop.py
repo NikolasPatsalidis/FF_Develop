@@ -5780,7 +5780,6 @@ class Setup_Interfacial_Optimization():
         'opt_disp':True,
         'optimize':True,
         'costf':'MSE',
-        'costf_params':{},  # Measure-specific hyperparameters, e.g., {'lam': 0.3} for sMSE
         
         'training_method':'scan_force_error',
          'random_initializations': 2,
@@ -5838,6 +5837,7 @@ class Setup_Interfacial_Optimization():
         
         'test_descriptors': False,
         
+        'costf_params':"dict()",  # Measure-specific hyperparameters, e.g., {'lam': 0.3} for sMSE
         'distance_map':"dict()",
         'reference_energy':"dict()",
         'struct_types':"[('type1'),('type2','type3')]",
@@ -5849,7 +5849,7 @@ class Setup_Interfacial_Optimization():
         'not_optimize_force_for':"[]"
         }
 
-    executes = ['distance_map','reference_energy','struct_types','rigid_types',
+    executes = ['distance_map','reference_energy','struct_types','rigid_types','costf_params',
             'lammps_potential_extra_lines','extra_pair_coeff','not_optimize_force_for']
     
     def __init__(self, methodology_file, potential_file=None):
