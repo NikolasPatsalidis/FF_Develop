@@ -27,7 +27,7 @@ def main():
             lines = f.readlines()
         
         # Parse header
-        header = lines[0].strip().split(',')
+        header = list(lines[0].strip().split(','))
         
         # Find max columns
         max_cols = max(len(line.split(',')) for line in lines)
@@ -39,13 +39,13 @@ def main():
         # Parse data rows
         data = []
         for line in lines[1:]:
-            row = line.strip().split(',')
+            row = list(line.strip().split(','))
             # Pad row if needed
             while len(row) < max_cols:
                 row.append('')
             data.append(row[:max_cols])  # Truncate if too long
         
-        return pd.DataFrame(data, columns=header)
+        return pd.DataFrame(data, columns=list(header))
     
     df_costs = read_variable_csv(costs_file)
     df_predict = read_variable_csv(predict_file) if predict_file else None
