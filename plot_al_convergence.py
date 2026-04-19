@@ -3,7 +3,7 @@
 
 import sys
 import argparse
-import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 
 def main():
@@ -21,58 +21,40 @@ def main():
     show_dev = not args.no_dev
     show_pred = not args.no_pred and predict_file is not None
     
-    def read_variable_csv(filepath):
-        """Read CSV with variable column counts."""
-        from io import StringIO
-        
+    def read_csv_to_dict(filepath):
+        """Read CSV to dict of arrays, handling variable columns."""
         with open(filepath, 'r') as f:
-            lines = f.readlines()
+            lines = [l.strip() for l in f.readlines() if l.strip()]
         
-        # Find max columns and pad all rows
-        max_cols = max(len(line.split(',')) for line in lines)
-        header = lines[0].strip().split(',')
-        while len(header) < max_cols:
-            header.append(f'extra_{len(header)}')
+        header = lines[0].split(',')
+        data = {h: [] for h in header}
         
-        # Rebuild CSV with consistent columns
-        new_lines = [','.join(header)]
         for line in lines[1:]:
-            row = line.strip().split(',')
-            while len(row) < max_cols:
-                row.append('')
-            new_lines.append(','.join(row[:max_cols]))
+            row = line.split(',')
+            for i, h in enumerate(header):
+                val = row[i] if i < len(row) else ''
+                try:
+                    data[h].append(float(val))
+                except ValueError:
+                    data[h].append(np.nan)
         
-        return pd.read_csv(StringIO('\n'.join(new_lines)))
+        return {k: np.array(v) for k, v in data.items()}
     
-    df_costs = read_variable_csv(costs_file)
-    df_predict = read_variable_csv(predict_file) if predict_file else None
+    costs = read_csv_to_dict(costs_file)
+    pred = read_csv_to_dict(predict_file) if predict_file else None
     
-    # Convert numeric columns
-    for col in ['MAE_train_energy', 'MAE_train_forces', 'MAE_dev_energy', 'MAE_dev_forces']:
-        df_costs[col] = pd.to_numeric(df_costs[col], errors='coerce')
-        if df_predict is not None and col in df_predict.columns:
-            df_predict[col] = pd.to_numeric(df_predict[col], errors='coerce')
+    # Get iterations (first column)
+    iter_col = list(costs.keys())[0]
+    iterations_costs = costs[iter_col]
+    iterations_pred = pred[list(pred.keys())[0]] if pred else None
     
-    # Get iteration column (first column) - handle independently for each file
-    iter_col = df_costs.columns[0]
-    df_costs[iter_col] = pd.to_numeric(df_costs[iter_col], errors='coerce')
-    iterations_costs = df_costs[iter_col].values
-    
-    iterations_pred = None
-    if df_predict is not None:
-        iter_col_pred = df_predict.columns[0]
-        df_predict[iter_col_pred] = pd.to_numeric(df_predict[iter_col_pred], errors='coerce')
-        iterations_pred = df_predict[iter_col_pred].values
-    
-    # From COSTS.csv
-    train_energy = df_costs['MAE_train_energy'].values
-    train_forces = df_costs['MAE_train_forces'].values
-    dev_energy = df_costs['MAE_dev_energy'].values
-    dev_forces = df_costs['MAE_dev_forces'].values
-    
-    # From predictCOSTS.csv (prediction set)
-    pred_energy = df_predict['MAE_train_energy'].values if df_predict is not None else None
-    pred_forces = df_predict['MAE_train_forces'].values if df_predict is not None else None
+    # Extract data
+    train_energy = costs.get('MAE_train_energy', np.array([]))
+    train_forces = costs.get('MAE_train_forces', np.array([]))
+    dev_energy = costs.get('MAE_dev_energy', np.array([]))
+    dev_forces = costs.get('MAE_dev_forces', np.array([]))
+    pred_energy = pred.get('MAE_train_energy', np.array([])) if pred else None
+    pred_forces = pred.get('MAE_train_forces', np.array([])) if pred else None
     
     fig, ax1 = plt.subplots(figsize=(5.3, 3.3))
     
