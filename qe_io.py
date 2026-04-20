@@ -520,6 +520,7 @@ def write_pw_input(at_types, positions, cell,  pseudo_map, prefix='pw', ibrav=0,
     outdir = f'{prefix}_out'
     mixing_mode='local-TF'
     ion_dynamics='bfgs'
+    disk_io='minimal'
 
     ve = ','if add_commas else ''
     # If cell information is provided globally, you can overwrite it
@@ -534,6 +535,7 @@ def write_pw_input(at_types, positions, cell,  pseudo_map, prefix='pw', ibrav=0,
         f.write(f'  calculation = {repr(calculation)}{ve} \n')
         f.write(f'  prefix = {repr(prefix)}{ve}\n')
         f.write(f' outdir = {repr(outdir)}{ve}\n')
+        f.write(f' disk_io = {repr(disk_io)}{ve}\n')  
         f.write(f'  pseudo_dir = {repr(pseudo_dir)} {ve}\n')
         f.write(f'  nstep = {nstep}{ve}\n')
         f.write('/\n\n')
