@@ -4831,7 +4831,7 @@ class LJ:
        
     def find_gradient(self):
         """Compute gradient of potential w.r.t. parameters."""
-        sigma, epsilon = self.params) 
+        sigma, epsilon = self.params
         g = NumbaHelpers._numba_LJ_gradient(self.r, sigma, epsilon)
         self.params_gradient = g
         return g
