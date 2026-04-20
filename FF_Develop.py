@@ -170,6 +170,16 @@ class NumbaHelpers:
         fg[1] = 2 * (r - r0)
         return fg
     
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_harmonic_gradient(r, r0, k):
+        n = r.shape[0]
+        g = np.empty((2, n), dtype=np.float64)
+        r_r0 = r - r0
+        g[0] = -2 * k * r_r0
+        g[1] = r_r0 * r_r0
+        return g
+    
     # ==================== harmonic3 ====================
     @staticmethod
     @njit(fastmath=True, cache=True)
@@ -202,6 +212,21 @@ class NumbaHelpers:
         fg[3] = 4 * r_r0m3
         return fg
     
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_harmonic3_gradient(r, r0, k1, k2, k3):
+        n = r.shape[0]
+        r_r0 = r - r0
+        r_r0m2 = r_r0 * r_r0
+        r_r0m3 = r_r0m2 * r_r0
+        r_r0m4 = r_r0m2 * r_r0m2
+        g = np.empty((4, n), dtype=np.float64)
+        g[0] = -(2 * k1 * r_r0 + 3 * k2 * r_r0m2 + 4 * k3 * r_r0m3)
+        g[1] = r_r0m2
+        g[2] = r_r0m3
+        g[3] = r_r0m4
+        return g
+    
     # ==================== LJ ====================
     @staticmethod
     @njit(fastmath=True, cache=True)
@@ -227,6 +252,17 @@ class NumbaHelpers:
         fg[0] = 144 * epsilon * (so_r6 - 4 * so_r12) / sigma / r
         fg[1] = 24 * (so_r6 - 2 * so_r12) / r
         return fg
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_LJ_gradient(r, sigma, epsilon):
+        n = r.shape[0]
+        so_r6 = (sigma / r) ** 6
+        so_r12 = so_r6 * so_r6
+        g = np.empty((2, n), dtype=np.float64)
+        g[0] = 4 * epsilon * (12 * so_r12 - 6 * so_r6) / sigma
+        g[1] = 4 * (so_r12 - so_r6)
+        return g
     
     # ==================== MorseBond ====================
     @staticmethod
@@ -260,6 +296,21 @@ class NumbaHelpers:
         fg[2] = 2 * De * (alpha * r_re * r2r - rr)
         return fg
     
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_MorseBond_gradient(r, re, De, alpha):
+        n = r.shape[0]
+        r_re = r - re
+        t1 = -alpha * r_re
+        e1 = np.exp(t1)
+        me1 = 1 - e1
+        me1_e1 = me1 * e1
+        g = np.empty((3, n), dtype=np.float64)
+        g[0] = -2 * De * alpha * me1_e1
+        g[1] = me1 * me1
+        g[2] = 2 * De * r_re * me1_e1
+        return g
+    
     # ==================== Morse ====================
     @staticmethod
     @njit(fastmath=True, cache=True)
@@ -289,6 +340,21 @@ class NumbaHelpers:
         fg[2] = 2 * De * (alpha * r_re * r2r - rr)
         return fg
     
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Morse_gradient(r, re, De, alpha):
+        n = r.shape[0]
+        r_re = r - re
+        t1 = -alpha * r_re
+        e1 = np.exp(t1)
+        e2 = np.exp(2 * t1)
+        rr = e2 - e1
+        g = np.empty((3, n), dtype=np.float64)
+        g[0] = 2 * De * alpha * rr
+        g[1] = rr - e1
+        g[2] = -2 * De * r_re * rr
+        return g
+    
     # ==================== expCos ====================
     @staticmethod
     @njit(fastmath=True, cache=True)
@@ -315,6 +381,18 @@ class NumbaHelpers:
         fg[1] = f2 * np.sin(the) * (1 - 2 * lam * cos_diff * cos_diff)
         fg[2] = dydx * (1 / lam - cos_diff * cos_diff)
         return fg
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_expCos_gradient(r, ke, the, lam):
+        n = r.shape[0]
+        cos_diff = np.cos(r) - np.cos(the)
+        f1 = np.exp(-lam * cos_diff * cos_diff)
+        g = np.empty((3, n), dtype=np.float64)
+        g[0] = f1
+        g[1] = ke * f1 * cos_diff * (-2 * lam * np.sin(the))
+        g[2] = ke * f1 * cos_diff * (-cos_diff)
+        return g
     
     # ==================== Fourier ====================
     @staticmethod
@@ -345,6 +423,17 @@ class NumbaHelpers:
         for j in range(1, n_params + 1):
             fg[j - 1] = -np.sin(j * r)
         return fg
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Fourier_gradient(r, params, ra_min):
+        n_params = params.shape[0]
+        nr = r.shape[0]
+        g = np.empty((n_params, nr), dtype=np.float64)
+        for j in range(1, n_params + 1):
+            inv_j = 1.0 / j
+            g[j - 1] = inv_j * np.cos(j * r) - inv_j * np.cos(j * ra_min)
+        return g
 
 
 class Parsers():
@@ -4671,18 +4760,7 @@ class harmonic3:
     def find_gradient(self):
         """Compute gradient of potential w.r.t. parameters."""
         r0, k1, k2, k3 = self.params
-        r = self.r
-        r_r0 = r - r0
-        r_r0m2 = r_r0*r_r0
-        r_r0m3 = r_r0m2*r_r0
-        r_r0m4 = r_r0m2*r_r0m2
-        
-        g = np.empty((4,r.shape[0]), dtype=np.float64)
-        g[0] = - (2*k1*r_r0 + 3*k2*r_r0m2 + 4*k3*r_r0m3)
-        g[1] = r_r0m2 
-        g[2] = r_r0m3 
-        g[3] = r_r0m4 
-        
+        g = NumbaHelpers._numba_harmonic3_gradient(self.r, r0, k1, k2 ,k3)        
         self.params_gradient = g
         return g
     
@@ -4718,11 +4796,7 @@ class harmonic:
     def find_gradient(self):
         """Compute gradient of potential w.r.t. parameters."""
         r0, k = self.params
-        r = self.r
-        g = np.empty((2,r.shape[0]), dtype=np.float64)
-        r_r0 = r - r0
-        g[0] = -2*k*(r_r0)
-        g[1] = r_r0 * r_r0
+        g = NumbaHelpers._numba_harmonic_gradient(self.r, r0, k)
         self.params_gradient = g
         return g
 
@@ -4757,13 +4831,8 @@ class LJ:
        
     def find_gradient(self):
         """Compute gradient of potential w.r.t. parameters."""
-        sigma, epsilon = self.params
-        r = self.r
-        so_r6 = (sigma/r)**6
-        so_r12 = so_r6*so_r6
-        g = np.zeros((2,r.shape[0]))
-        g[0] = 4 * epsilon * (12*so_r12  - 6*so_r6 )/sigma 
-        g[1] = 4 * (so_r12 - so_r6) 
+        sigma, epsilon = self.params) 
+        g = NumbaHelpers._numba_LJ_gradient(self.r, sigma, epsilon)
         self.params_gradient = g
         return g
 
@@ -4797,19 +4866,8 @@ class MorseBond:
        
     def find_gradient(self):
         """Compute gradient of potential w.r.t. parameters."""
-        r = self.r
         re, De, alpha = self.params
-        nr = r.shape[0]
-        n = self.params.shape[0]
-        g = np.zeros((n,nr))
-        r_re = r-re
-        t1 = -alpha*r_re
-        e1 = np.exp(t1)
-        me1 = 1 - e1
-        me1_e1 = me1*e1
-        g[0] = -2 * De * alpha * me1_e1
-        g[1] = me1*me1
-        g[2] = 2 * De * r_re * me1_e1
+        g = NumbaHelpers._numba_MorseBond_gradient(self.r, re, De, alpha)
         self.params_gradient = g
         return g
     
@@ -4843,15 +4901,7 @@ class expCos:
     def find_gradient(self):
         """Compute gradient of potential w.r.t. parameters."""
         ke, the, lam = self.params
-        r = self.r
-        nr = r.shape[0]
-        n = self.params.shape[0]
-        cos_diff = np.cos(r) - np.cos(the)
-        g = np.zeros((n,nr))
-        f1 = np.exp( -lam * cos_diff * cos_diff )
-        g[0] = f1
-        g[1] = ke * f1 * cos_diff * ( -2 * lam * np.sin(the) )
-        g[2] = ke * f1 * cos_diff * (-cos_diff)
+        g = NumbaHelpers._numba_expCos_gradient(r, ke, the, lam)
         self.params_gradient = g
         return g
     
@@ -4894,14 +4944,8 @@ class Fourier:
        
     def find_gradient(self):
         """Compute gradient of potential w.r.t. parameters."""
-        r = self.r
-        x = self.params
         _, ra_min = self.get_min()
-        nr = r.shape[0]
-        n = x.shape[0]
-        g = np.zeros((n,nr))
-        for j in range(1,n+1):
-            g[j-1] = (j**(-1)) * np.cos(j*r) - (j**(-1)) * np.cos(j*ra_min)
+        g = NumbaHelpers._numba_Fourier_gradient(self.r, self.params, ra_min)
         self.params_gradient = g
         return g
     
@@ -4933,19 +4977,8 @@ class Morse:
        
     def find_gradient(self):
         """Compute gradient of potential w.r.t. parameters."""
-        r = self.r
         re, De, alpha = self.params
-        nr = r.shape[0]
-        n = self.params.shape[0]
-        g = np.zeros((n,nr))
-        r_re = r-re
-        t1 = -alpha*r_re
-        e1 = np.exp(t1)
-        e2 = np.exp(2*t1)
-        rr = (e2 - e1)
-        g[0] = 2 * De * alpha * rr
-        g[1] = rr - e1
-        g[2] = -2 * De * r_re * rr
+        g = NumbaHelpers._numba_Morse_gradient(self.r, re, De, alpha)
         self.params_gradient = g
         return g
     
