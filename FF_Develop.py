@@ -46,6 +46,7 @@ mp.dps = 32
 import collections
 import six
 import ase
+from concurrent.futures import ThreadPoolExecutor
 
 import lammpsreader as lammps_reader
 from qe_io import mass_map as ATOMIC_MASSES
@@ -8858,29 +8859,62 @@ class FF_Optimizer(Optimizer):
         return gu
     
     @staticmethod
-    def computeUclass(params,ne,models_list_info):
-        """Compute total classical energy for all data points."""
-        Uclass = np.zeros(ne,dtype=float)
+    def _compute_model_energy(args):
+        """Helper to compute energy contribution from a single model (for parallel execution)."""
+        minf, objparams = args
+        model_pars = FF_Optimizer.array_model_parameters(
+            objparams, minf.fixed_params, minf.isnot_fixed
+        )
+        Utemp = FF_Optimizer.UperModelContribution(
+            minf.u_model, minf.dists, minf.dl, minf.du,
+            model_pars, *minf.model_args
+        )
+        return Utemp
+    
+    @staticmethod
+    def computeUclass(params, ne, models_list_info, n_workers=None):
+        """Compute total classical energy for all data points.
+        
+        Parameters
+        ----------
+        params : np.ndarray
+            Flattened array of optimizable parameters.
+        ne : int
+            Number of data points (configurations).
+        models_list_info : list
+            List of Model_Info objects for each potential term.
+        n_workers : int, optional
+            Number of parallel workers. If None or 1, runs sequentially.
+            
+        Returns
+        -------
+        Uclass : np.ndarray
+            Total classical energy for each data point.
+        """
+        # Pre-compute param slices for each model
+        param_slices = []
         npars_old = 0
         for minf in models_list_info:
-            #t0 = perf_counter()
-            npars_new = npars_old  + minf.n_notfixed
-            
-            objparams = params[ npars_old : npars_new ]
-            model_pars = FF_Optimizer.array_model_parameters(objparams,
-                                                    minf.fixed_params,
-                                                    minf.isnot_fixed,
-                                                    )
-            #print('overhead {:4.6f} sec'.format(perf_counter()-t0))
-            #compute Uclass
-            
-            Utemp = FF_Optimizer.UperModelContribution( minf.u_model,
-                    minf.dists, minf.dl, minf.du,
-                    model_pars, *minf.model_args)
-            #print(minf.name, Utemp)
-            Uclass += Utemp
-            #print('computation {:4.6f} sec'.format(perf_counter()-t0))
+            npars_new = npars_old + minf.n_notfixed
+            objparams = params[npars_old:npars_new]
+            param_slices.append((minf, objparams))
             npars_old = npars_new
+        
+        # Sequential execution if n_workers is None or 1
+        if n_workers is None or n_workers <= 1 or len(models_list_info) <= 1:
+            Uclass = np.zeros(ne, dtype=float)
+            for args in param_slices:
+                Uclass += FF_Optimizer._compute_model_energy(args)
+            return Uclass
+        
+        # Parallel execution
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            results = list(executor.map(FF_Optimizer._compute_model_energy, param_slices))
+        
+        # Sum all contributions
+        Uclass = np.zeros(ne, dtype=float)
+        for Utemp in results:
+            Uclass += Utemp
         return Uclass
     
     @staticmethod
