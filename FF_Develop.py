@@ -8862,8 +8862,9 @@ class FF_Optimizer(Optimizer):
         """Compute total classical energy for all data points."""
         Uclass = np.zeros(ne,dtype=float)
         npars_old = 0
+        timings = []
         for minf in models_list_info:
-            #t0 = perf_counter()
+            t0 = perf_counter()
             npars_new = npars_old  + minf.n_notfixed
             
             objparams = params[ npars_old : npars_new ]
@@ -8871,16 +8872,17 @@ class FF_Optimizer(Optimizer):
                                                     minf.fixed_params,
                                                     minf.isnot_fixed,
                                                     )
-            #print('overhead {:4.6f} sec'.format(perf_counter()-t0))
-            #compute Uclass
             
             Utemp = FF_Optimizer.UperModelContribution( minf.u_model,
                     minf.dists, minf.dl, minf.du,
                     model_pars, *minf.model_args)
-            #print(minf.name, Utemp)
             Uclass += Utemp
-            #print('computation {:4.6f} sec'.format(perf_counter()-t0))
+            timings.append((minf.name, perf_counter()-t0, minf.dists.shape[0]))
             npars_old = npars_new
+        print("computeUclass timing:")
+        for name, dt, ndists in timings:
+            print(f"  {name}: {dt*1000:.2f}ms ({ndists} dists)")
+        print(f"  TOTAL: {sum(t for _,t,_ in timings)*1000:.2f}ms")
         return Uclass
     
     @staticmethod
@@ -8889,8 +8891,9 @@ class FF_Optimizer(Optimizer):
         n_p = params.shape[0]
         Uclass_grad = np.zeros((n_p,ne), dtype=np.float64)
         npars_old = 0
+        timings = []
         for minf in models_list_info:
-            #t0 = perf_counter()
+            t0 = perf_counter()
             npars_new = npars_old  + minf.n_notfixed
             
             objparams = params[ npars_old : npars_new ]
@@ -8905,8 +8908,12 @@ class FF_Optimizer(Optimizer):
                     model_pars, *minf.model_args)
 
             Uclass_grad[npars_old: npars_new] = gu[minf.isnot_fixed]
-           
+            timings.append((minf.name, perf_counter()-t0, minf.dists.shape[0]))
             npars_old = npars_new
+        print("gradUclass timing:")
+        for name, dt, ndists in timings:
+            print(f"  {name}: {dt*1000:.2f}ms ({ndists} dists)")
+        print(f"  TOTAL: {sum(t for _,t,_ in timings)*1000:.2f}ms")
         return Uclass_grad
     
     @staticmethod
@@ -8915,9 +8922,10 @@ class FF_Optimizer(Optimizer):
 
         Forces_tot =  np.zeros( ( n_forces ,3), dtype=np.float64) 
         npars_old = 0
+        timings = []
         for model_info in models_list_info:
+            t0 = perf_counter()
             Forces =  np.zeros( (  n_forces ,3), dtype=np.float64)   
-            #t0 = perf_counter()
            
             npars_new = npars_old  + model_info.n_notfixed
             
@@ -8929,10 +8937,14 @@ class FF_Optimizer(Optimizer):
             
             FF_Optimizer.ForcesPerModel(Forces, model_pars, model_info)
             
-            
             npars_old = npars_new
             Forces_tot += Forces
+            timings.append((model_info.name, perf_counter()-t0, model_info.dists.shape[0]))
 
+        print("computeForceClass timing:")
+        for name, dt, ndists in timings:
+            print(f"  {name}: {dt*1000:.2f}ms ({ndists} dists)")
+        print(f"  TOTAL: {sum(t for _,t,_ in timings)*1000:.2f}ms")
         return Forces_tot
     
     @staticmethod
@@ -8941,10 +8953,11 @@ class FF_Optimizer(Optimizer):
         
         gradForces_tot =  np.zeros( (params.shape[0], n_forces ,3), dtype=np.float64) 
         npars_old = 0
+        timings = []
         for model_info in models_list_info:
+            t0 = perf_counter()
             gradForces =  np.zeros( ( model_info.n_pars,  n_forces ,3),
                                dtype=np.float64)   
-            #t0 = perf_counter()
            
             npars_new = npars_old  + model_info.n_notfixed
             
@@ -8957,9 +8970,13 @@ class FF_Optimizer(Optimizer):
             FF_Optimizer.gradForcesPerModel(gradForces, model_pars, model_info)
             
             gradForces_tot[npars_old: npars_new] = gradForces[model_info.isnot_fixed]
-            
+            timings.append((model_info.name, perf_counter()-t0, model_info.dists.shape[0]))
             npars_old = npars_new
             
+        print("computeGradForceClass timing:")
+        for name, dt, ndists in timings:
+            print(f"  {name}: {dt*1000:.2f}ms ({ndists} dists)")
+        print(f"  TOTAL: {sum(t for _,t,_ in timings)*1000:.2f}ms")
         return gradForces_tot
     
     @staticmethod
@@ -10647,6 +10664,7 @@ class FF_Optimizer(Optimizer):
                     # Shuffle batch order at each epoch
                     batch_order = np.random.permutation(n_batches)
                     
+                    t_batches = perf_counter()
                     for batch_idx in batch_order:
                         batch_args = batch_args_dict[batch_idx]
                         
@@ -10676,12 +10694,17 @@ class FF_Optimizer(Optimizer):
                         # Clip to bounds
                         for i, (lb, ub) in enumerate(bounds):
                             params[i] = np.clip(params[i], lb, ub)
+                    t_batches = perf_counter() - t_batches
                     
                     # Evaluate on full training set at end of epoch
+                    t_train = perf_counter()
                     train_cost = self.CostFunction(params, *full_args)
+                    t_train = perf_counter() - t_train
                     
                     # Evaluate on dev set for best model selection
+                    t_dev = perf_counter()
                     dev_cost = self.CostFunction(params, *dev_args)
+                    t_dev = perf_counter() - t_dev
                     cost_history.append(dev_cost)
                     
                     # Store best params based on dev set performance
@@ -10723,7 +10746,7 @@ class FF_Optimizer(Optimizer):
                     if epoch % log_every == 0 or epoch < log_every:
                         epoch_time = perf_counter() - t_epoch
                         total_time = perf_counter() - tmethod
-                        print(f'Adam Epoch {epoch}, Train Cost = {train_cost:.6e}, Dev Cost = {dev_cost:.6e}, LR = {lr_t:.4e}, Epoch = {epoch_time:.2f}s, Total = {total_time:.1f}s')
+                        print(f'Adam Epoch {epoch}, Train = {train_cost:.4e}, Dev = {dev_cost:.4e}, LR = {lr_t:.2e} | Batches={t_batches:.2f}s, TrainEval={t_train:.2f}s, DevEval={t_dev:.2f}s, Epoch={epoch_time:.2f}s')
                         sys.stdout.flush()
                     
                     epoch += 1
