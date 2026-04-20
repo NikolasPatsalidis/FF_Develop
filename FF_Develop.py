@@ -8872,7 +8872,7 @@ class FF_Optimizer(Optimizer):
         return Utemp
     
     @staticmethod
-    def computeUclass(params, ne, models_list_info, n_workers=10):
+    def computeUclass(params, ne, models_list_info, n_workers=None):
         """Compute total classical energy for all data points.
         
         Parameters
@@ -8931,7 +8931,7 @@ class FF_Optimizer(Optimizer):
         return (npars_old, npars_new, gu[minf.isnot_fixed])
     
     @staticmethod
-    def gradUclass(params, ne, models_list_info, n_workers=10):
+    def gradUclass(params, ne, models_list_info, n_workers=None):
         """Compute gradient of classical energy w.r.t. all parameters.
         
         Parameters
@@ -8991,7 +8991,7 @@ class FF_Optimizer(Optimizer):
         return Forces
     
     @staticmethod
-    def computeForceClass(params, n_forces, models_list_info, n_workers=10):
+    def computeForceClass(params, n_forces, models_list_info, n_workers=None):
         """Compute total classical forces for all atoms.
         
         Parameters
@@ -9048,7 +9048,7 @@ class FF_Optimizer(Optimizer):
         return (npars_old, npars_new, gradForces[model_info.isnot_fixed])
     
     @staticmethod
-    def computeGradForceClass(params, n_forces, models_list_info, n_workers=10):
+    def computeGradForceClass(params, n_forces, models_list_info, n_workers=None):
         """Compute gradient of classical forces w.r.t. all parameters.
         
         Parameters
