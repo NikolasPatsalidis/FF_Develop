@@ -10677,6 +10677,7 @@ class FF_Optimizer(Optimizer):
                 
                 log_every=10
                 while epoch < maxiter:
+                    t_epoch = perf_counter()
                     # Shuffle batch order at each epoch
                     batch_order = np.random.permutation(n_batches)
                     
@@ -10754,7 +10755,9 @@ class FF_Optimizer(Optimizer):
                             sys.stdout.flush()
                     
                     if epoch % log_every == 0 or epoch < log_every:
-                        print(f'Adam Epoch {epoch}, Train Cost = {train_cost:.6e}, Dev Cost = {dev_cost:.6e}, LR = {lr_t:.4e}')
+                        epoch_time = perf_counter() - t_epoch
+                        total_time = perf_counter() - tmethod
+                        print(f'Adam Epoch {epoch}, Train Cost = {train_cost:.6e}, Dev Cost = {dev_cost:.6e}, LR = {lr_t:.4e}, Epoch Time = {epoch_time:.2f}s, Total = {total_time:.1f}s')
                         sys.stdout.flush()
                     
                     epoch += 1
