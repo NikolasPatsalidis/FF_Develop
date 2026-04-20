@@ -9039,11 +9039,11 @@ class FF_Optimizer(Optimizer):
     @staticmethod
     def _compute_model_forces_grad(args):
         """Helper to compute force gradient from a single model (for parallel execution)."""
-        model_info, objparams, npars_old, npars_new = args
+        model_info, objparams, npars_old, npars_new, n_forces = args
         model_pars = FF_Optimizer.array_model_parameters(
             objparams, model_info.fixed_params, model_info.isnot_fixed
         )
-        gradForces = np.zeros((model_info.n_pars, model_info.n_forces, 3), dtype=np.float64)
+        gradForces = np.zeros((model_info.n_pars, n_forces, 3), dtype=np.float64)
         FF_Optimizer.gradForcesPerModel(gradForces, model_pars, model_info)
         return (npars_old, npars_new, gradForces[model_info.isnot_fixed])
     
@@ -9075,7 +9075,7 @@ class FF_Optimizer(Optimizer):
         for model_info in models_list_info:
             npars_new = npars_old + model_info.n_notfixed
             objparams = params[npars_old:npars_new]
-            param_slices.append((model_info, objparams, npars_old, npars_new))
+            param_slices.append((model_info, objparams, npars_old, npars_new, n_forces))
             npars_old = npars_new
         
         # Sequential execution if n_workers is None or 1
