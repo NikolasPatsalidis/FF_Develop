@@ -73,6 +73,75 @@ def _sum_gradient_segments(g, dl, du, n_p, data_size):
             gu[j, i] = total
     return gu
 
+# =========== BATCHED NUMBA FUNCTIONS FOR GRADIENT FORCE CALCULATIONS ===========
+@njit(parallel=True, fastmath=True, cache=True)
+def _numba_add_ij_batch(gradForces, fg, partial_ri, i_indices, j_indices):
+    """Add pairwise force gradient contributions for ALL parameters at once.
+    
+    gradForces: (n_pars, n_forces, 3)
+    fg: (n_pars, n_pairs) - derivative gradient
+    partial_ri: (n_pairs, 3) - unit vectors
+    """
+    n_pars = fg.shape[0]
+    n_pairs = len(i_indices)
+    for n in prange(n_pars):
+        for k in range(n_pairs):
+            i, j = i_indices[k], j_indices[k]
+            pw = fg[n, k]
+            for d in range(3):
+                gradForces[n, i, d] += pw * partial_ri[k, d]
+                gradForces[n, j, d] -= pw * partial_ri[k, d]
+
+@njit(parallel=True, fastmath=True, cache=True)
+def _numba_add_ij_ld_batch(gradForces, fg, to_ij, v_ij, i_indices, j_indices):
+    """Add LD pairwise force gradient contributions for ALL parameters at once."""
+    n_pars = fg.shape[0]
+    n_pairs = len(i_indices)
+    for n in prange(n_pars):
+        for k in range(n_pairs):
+            i, j = i_indices[k], j_indices[k]
+            pw = fg[n, to_ij[k]]
+            for d in range(3):
+                gradForces[n, i, d] += pw * v_ij[k, d]
+                gradForces[n, j, d] -= pw * v_ij[k, d]
+
+@njit(parallel=True, fastmath=True, cache=True)
+def _numba_add_angle_batch(gradForces, fg, pa, pc, i_indices, j_indices, k_indices):
+    """Add angle force gradient contributions for ALL parameters at once.
+    
+    gradForces: (n_pars, n_forces, 3)
+    fg: (n_pars, n_angles)
+    pa, pc: (n_angles, 3) - partial derivatives
+    """
+    n_pars = fg.shape[0]
+    n_angles = len(i_indices)
+    for n in prange(n_pars):
+        for m in range(n_angles):
+            i, j, k = i_indices[m], j_indices[m], k_indices[m]
+            fg_n = fg[n, m]
+            for d in range(3):
+                fa = pa[m, d] * fg_n
+                fc = pc[m, d] * fg_n
+                gradForces[n, i, d] += fa
+                gradForces[n, k, d] += fc
+                gradForces[n, j, d] -= (fa + fc)
+
+@njit(parallel=True, fastmath=True, cache=True)
+def _numba_add_dihedral_batch(gradForces, fg, dri, drj, drk, drl, 
+                               i_indices, j_indices, k_indices, l_indices):
+    """Add dihedral force gradient contributions for ALL parameters at once."""
+    n_pars = fg.shape[0]
+    n_dihedrals = len(i_indices)
+    for n in prange(n_pars):
+        for m in range(n_dihedrals):
+            i, j, k, l = i_indices[m], j_indices[m], k_indices[m], l_indices[m]
+            fg_n = fg[n, m]
+            for d in range(3):
+                gradForces[n, i, d] += dri[m, d] * fg_n
+                gradForces[n, j, d] += drj[m, d] * fg_n
+                gradForces[n, k, d] += drk[m, d] * fg_n
+                gradForces[n, l, d] += drl[m, d] * fg_n
+
 class Parsers():
     """Base class for parsing molecular structure files.
 
@@ -8981,7 +9050,11 @@ class FF_Optimizer(Optimizer):
     
     @staticmethod
     def gradForcesPerModel(gradForces, model_pars, model_info ):
-        """Compute gradient of forces w.r.t. parameters for a single model."""
+        """Compute gradient of forces w.r.t. parameters for a single model.
+        
+        Uses batched numba functions to process all parameters at once,
+        avoiding Python loop overhead.
+        """
         dists = model_info.dists
         if dists.shape[0] == 0: 
             return
@@ -8991,36 +9064,26 @@ class FF_Optimizer(Optimizer):
         
         i_index = model_info.i_indexes
         j_index = model_info.j_indexes
-        #ntotal = number of forces
         # F = -dU/dr, so dF/dθ = -d²U/(dr·dθ)
         fg = -compute_obj.find_derivative_gradient() #shape = (npars, ntotal)
-        nf = fg.shape[1]
+        
         if model_info.category == 'PW' or model_info.category == 'BO':
-            for n in range(n_pars):
-                pw_ij = fg[n].reshape( (nf,1) )*model_info.partial_ri
-                FF_Optimizer.numba_add_ij(gradForces[n], pw_ij, i_index, j_index)
+            # Batched version: process all parameters at once
+            _numba_add_ij_batch(gradForces, fg, model_info.partial_ri, i_index, j_index)
             
         elif model_info.category == 'LD':
-            for n in range(n_pars):
-                pw_ij = fg[n].reshape( (nf,1) )[ model_info.to_ij ]*model_info.v_ij
-                FF_Optimizer.numba_add_ij(gradForces[n], pw_ij, i_index, j_index)
+            _numba_add_ij_ld_batch(gradForces, fg, model_info.to_ij, model_info.v_ij, 
+                                   i_index, j_index)
         elif model_info.category =='AN':
             k_index = model_info.k_indexes
-            for n in range(n_pars):
-                fa = model_info.pa*fg[n].reshape( (nf,1) )
-                fc = model_info.pc*fg[n].reshape( (nf,1) )
-                FF_Optimizer.numba_add_angle(gradForces[n], fa, fc, i_index, j_index, k_index)
+            _numba_add_angle_batch(gradForces, fg, model_info.pa, model_info.pc,
+                                   i_index, j_index, k_index)
         elif model_info.category =='DI':
             k_index = model_info.k_indexes
             l_index = model_info.l_indexes
-            for n in range(n_pars):
-                fg_resh = fg[n].reshape( (nf,1) )
-                fi = model_info.dri*fg_resh
-                fj = model_info.drj*fg_resh
-                fk = model_info.drk*fg_resh
-                fl = model_info.drl*fg_resh
-                FF_Optimizer.numba_add_dihedral(gradForces[n], fi, fj, fk, fl,
-                                        i_index, j_index, k_index, l_index)
+            _numba_add_dihedral_batch(gradForces, fg, model_info.dri, model_info.drj,
+                                      model_info.drk, model_info.drl,
+                                      i_index, j_index, k_index, l_index)
         
         return
     
