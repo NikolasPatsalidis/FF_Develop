@@ -4726,7 +4726,7 @@ class Fourier:
         self.params = params
         return 
     def u_vectorized(self):
-        """Compute potential energy for all angles, shifted so min(U) = 0."""
+        """Compute potential energy for all angles (no shift applied)."""
         x = self.params
         r = self.r
         
@@ -4735,10 +4735,7 @@ class Fourier:
         for j in range(1,n+1):
             u += x[j-1] * (j**(-1) * np.cos(j*r))
         
-        # Shift so minimum is 0: U_shifted = U - U_min
-        ua_min, _ = self.get_min()
-        
-        return u - ua_min
+        return u
 
     def get_min(self):
         x = self.params
@@ -4766,12 +4763,11 @@ class Fourier:
         """Compute gradient of potential w.r.t. parameters."""
         r = self.r
         x = self.params
-        _ , ra_min = self.get_min()
         nr = r.shape[0]
         n = x.shape[0]
         g = np.zeros((n,nr))
         for j in range(1,n+1):
-            g[j-1] =  (j**(-1)) * np.cos(j*r) - (j**(-1)) * np.cos(j*ra_min)
+            g[j-1] = (j**(-1)) * np.cos(j*r)
         self.params_gradient = g
         return g
     
