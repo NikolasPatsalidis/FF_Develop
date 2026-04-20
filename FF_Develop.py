@@ -10729,15 +10729,20 @@ class FF_Optimizer(Optimizer):
                     batch_order = np.random.permutation(n_batches)
                     
                     t_batches = perf_counter()
+                    t_grad_total = 0.0
+                    t_update_total = 0.0
                     for batch_idx in batch_order:
                         batch_args = batch_args_dict[batch_idx]
                         
                         t += 1
                         
                         # Compute gradient on batch
+                        t_grad = perf_counter()
                         grad = self.gradCost(params, *batch_args)
+                        t_grad_total += perf_counter() - t_grad
                         
                         # Update biased first moment estimate
+                        t_upd = perf_counter()
                         m = beta1 * m + (1 - beta1) * grad
                         
                         # Update biased second raw moment estimate
@@ -10758,6 +10763,7 @@ class FF_Optimizer(Optimizer):
                         # Clip to bounds
                         for i, (lb, ub) in enumerate(bounds):
                             params[i] = np.clip(params[i], lb, ub)
+                        t_update_total += perf_counter() - t_upd
                     t_batches = perf_counter() - t_batches
                     
                     # Evaluate on full training set at end of epoch
@@ -10810,7 +10816,10 @@ class FF_Optimizer(Optimizer):
                     if epoch % log_every == 0 or epoch < log_every:
                         epoch_time = perf_counter() - t_epoch
                         total_time = perf_counter() - tmethod
-                        print(f'Adam Epoch {epoch}, Train = {train_cost:.4e}, Dev = {dev_cost:.4e}, LR = {lr_t:.2e} | Batches={t_batches:.2f}s, TrainEval={t_train:.2f}s, DevEval={t_dev:.2f}s, Epoch={epoch_time:.2f}s')
+                        t_overhead = t_batches - t_grad_total - t_update_total
+                        print(f'Adam Epoch {epoch}, Train={train_cost:.4e}, Dev={dev_cost:.4e} | '
+                              f'Grad={t_grad_total*1000:.0f}ms, Upd={t_update_total*1000:.0f}ms, Overhead={t_overhead*1000:.0f}ms, '
+                              f'TrainEval={t_train*1000:.0f}ms, DevEval={t_dev*1000:.0f}ms, Epoch={epoch_time:.2f}s')
                         sys.stdout.flush()
                     
                     epoch += 1
