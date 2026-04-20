@@ -452,14 +452,15 @@ class ActiveLearningPipeline:
                 # Process DFT outputs
                 self.process_dft_outputs(iteration)
             
+            # Update input files for next iteration (from results folder)
+            self.potential_file = f"{self.setup.runpath}/potential.in"
+            self.setup = ff.Setup_Interfacial_Optimization(self.methodology_file, self.potential_file)
+            
             # Step D: Evaluation
             self.evaluate(iteration)
             
             print(f"\nIteration {iteration} completed in {perf_counter() - t_iter_start:.2f} sec")
             
-            # Update input files for next iteration (from results folder)
-            self.potential_file = f"{self.setup.runpath}/potential.in"
-            self.setup = ff.Setup_Interfacial_Optimization(self.methodology_file, self.potential_file)
             
         print("\n" + "=" * 60)
         print("ACTIVE LEARNING PIPELINE COMPLETED")
