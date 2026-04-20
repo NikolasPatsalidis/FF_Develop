@@ -48,6 +48,30 @@ import six
 import ase
 
 import lammpsreader as lammps_reader
+from qe_io import mass_map as ATOMIC_MASSES
+
+@njit(parallel=True, cache=True)
+def _sum_energy_segments(U, dl, du, data_size):
+    """JIT-compiled helper for energy segment summation."""
+    Up = np.empty(data_size, dtype=np.float64)
+    for i in prange(data_size):
+        total = 0.0
+        for k in range(dl[i], du[i]):
+            total += U[k]
+        Up[i] = total
+    return Up
+
+@njit(parallel=True, cache=True)
+def _sum_gradient_segments(g, dl, du, n_p, data_size):
+    """JIT-compiled helper for gradient segment summation."""
+    gu = np.empty((n_p, data_size), dtype=np.float64)
+    for j in prange(n_p):
+        for i in range(data_size):
+            total = 0.0
+            for k in range(dl[i], du[i]):
+                total += g[j, k]
+            gu[j, i] = total
+    return gu
 
 class Parsers():
     """Base class for parsing molecular structure files.
@@ -1172,28 +1196,35 @@ class al_help():
         return optimizer
 
     @staticmethod
-    def get_lammps_maps(data_point,parsed_args):
-        """Build LAMMPS mapping dictionaries from a data point and CLI args.
+    def get_lammps_maps(data_point, parsed_args=None):
+        """Build LAMMPS mapping dictionaries from a data point.
+
+        Uses atomic masses from periodic table (ATOMIC_MASSES) and defaults
+        charges to 0. The parsed_args parameter is deprecated and ignored.
+
+        Parameters
+        ----------
+        data_point : pandas.Series or dict
+            Data point containing 'at_type' field.
+        parsed_args : object, optional
+            Deprecated. Previously used for charge_map and mass_map.
+            Now ignored - masses come from periodic table, charges default to 0.
 
         Returns
         -------
         dict
             Contains `types_map`, `mass_map`, and `charge_map` for LAMMPS I/O.
         """
-        maps= dict()
-        maps['types_map'] = { k:j+1 for j,k in enumerate(np.unique(data_point['at_type'])) }
+        maps = dict()
+        atom_types = np.unique(data_point['at_type'])
+        maps['types_map'] = {k: j+1 for j, k in enumerate(atom_types)}
         
-        for name in ['mass_map','charge_map']:
-            a = getattr(parsed_args,name)
-            a = a.split(',')
-            #print(a)
-            d = dict()
-            for j in a:
-                l = j.split(':')
-                k = str(l[0])
-                v = float(l[1]) 
-                d[k]=v
-            maps[name] = d
+        # Use atomic masses from periodic table
+        maps['mass_map'] = {t: ATOMIC_MASSES.get(t, 1.0) for t in atom_types}
+        
+        # Default charges to 0
+        maps['charge_map'] = {t: 0.0 for t in atom_types}
+        
         return maps
 
     @staticmethod
@@ -1787,7 +1818,9 @@ class al_help():
             inter = Interactions(data, setup,
                                 vdw_bond_dist=3,
                                 rho_r0=setup.rho_r0,rho_rc=setup.rho_rc)
-        
+            
+            inter.print_interaction_info(np.random.randint(len(data)) , 'all')
+
             inter.InteractionsForData(setup)
             inter.test_descriptor_calculations(tol=1e-6)
         
@@ -5804,6 +5837,7 @@ class Setup_Interfacial_Optimization():
         
         'test_descriptors': False,
         
+        'costf_params':"dict()",  # Measure-specific hyperparameters, e.g., {'lam': 0.3} for sMSE
         'distance_map':"dict()",
         'reference_energy':"dict()",
         'struct_types':"[('type1'),('type2','type3')]",
@@ -5815,7 +5849,7 @@ class Setup_Interfacial_Optimization():
         'not_optimize_force_for':"[]"
         }
 
-    executes = ['distance_map','reference_energy','struct_types','rigid_types',
+    executes = ['distance_map','reference_energy','struct_types','rigid_types','costf_params',
             'lammps_potential_extra_lines','extra_pair_coeff','not_optimize_force_for']
     
     def __init__(self, methodology_file, potential_file=None):
@@ -6150,20 +6184,24 @@ class Setup_Interfacial_Optimization():
                 inter = tuple(inter)
             self.type = inter
             
+            # Detect if this is a special_type model (types contain '--')
+            is_special = any('--' in str(t) for t in inter)
+            special_prefix = 'special_' if is_special else ''
+            
             if 'PW' == self.category:
-                self.feature = 'vdw'
+                self.feature = special_prefix + 'vdw'
                 self.lammps_class = 'pair'
             elif 'LD' == self.category:
-                self.feature =  'rhos'
+                self.feature = special_prefix + 'rhos'
                 self.lammps_class = 'pair'
             elif 'BO' == self.category:
-                self.feature = 'connectivity'
+                self.feature = special_prefix + 'connectivity'
                 self.lammps_class = 'bond'
             elif 'AN' == self.category:
-                self.feature = 'angles'
+                self.feature = special_prefix + 'angles'
                 self.lammps_class ='angle'
             elif 'DI' == self.category:
-                self.feature ='dihedrals'
+                self.feature = special_prefix + 'dihedrals'
                 self.lammps_class = 'dihedral'
                 
             for j,line in enumerate(lines):
@@ -6778,6 +6816,70 @@ class Interactions():
         return united_types
     
     @staticmethod
+    def get_special_types(at_types, neibs):
+        """Generate special type labels based on atom type and neighboring atom types.
+        
+        Format: at_type--neib1neib2neib3... where neighbors are sorted alphabetically.
+        Examples: C--CCHH, C--CHHH, C--CNHH, H--C, H--N
+        
+        Parameters
+        ----------
+        at_types : array-like
+            Array of atom type strings.
+        neibs : dict
+            Dictionary mapping atom index to set of neighbor indices.
+            
+        Returns
+        -------
+        np.ndarray
+            Array of special type strings for each atom.
+        """
+        special_types = np.empty(len(at_types), dtype=object)
+        for i, t in enumerate(at_types):
+            if i in neibs and len(neibs[i]) > 0:
+                # Get neighbor types and sort alphabetically
+                neib_types = sorted([at_types[neib] for neib in neibs[i]])
+                neib_str = ''.join(neib_types)
+                special_types[i] = f"{t}--{neib_str}"
+            else:
+                # No neighbors - just use the atom type
+                special_types[i] = f"{t}--"
+        
+        return special_types
+    
+    @staticmethod
+    def get_base_type_from_special(special_type_tuple):
+        """Extract base atom types from a special type tuple.
+        
+        Examples:
+            ('C--CHHH', 'C--CHHN') -> ('C', 'C')
+            ('H--C', 'C--CHHH', 'H--N') -> ('C', 'H', 'H')  # sorted
+        
+        Parameters
+        ----------
+        special_type_tuple : tuple
+            Tuple of special type strings (e.g., ('C--CHHH', 'H--C'))
+            
+        Returns
+        -------
+        tuple
+            Tuple of base atom types, canonically sorted.
+        """
+        base_types = [st.split('--')[0] for st in special_type_tuple]
+        # Use the same sorting logic as sorted_id_and_type
+        if base_types[0] <= base_types[-1]:
+            reverse = False
+            if len(base_types) == 4:
+                if base_types[2] < base_types[1] and base_types[0] == base_types[-1]:
+                    reverse = True
+        else:
+            reverse = True
+        
+        if reverse:
+            return tuple(base_types[::-1])
+        return tuple(base_types)
+    
+    @staticmethod
     def get_itypes(model,at_types,bonds,neibs):
         """Get interaction types based on atom model (AA or UA)."""
         logger.debug('atom model = {:s}'.format(model))
@@ -6972,6 +7074,9 @@ class Interactions():
         types = Interactions.get_itypes(self.atom_model,at_types,Bonds,neibs)
         types = Interactions.get_at_types(types.copy(),Bonds)
         
+        # Compute special_types based on neighbors
+        special_types = Interactions.get_special_types(at_types, neibs)
+        
         #1.) Find 2 pair-non bonded interactions
         vdw = Interactions.get_vdw(types, bond_d_matrix, self.find_vdw_connected,
                       self.find_vdw_unconnected,
@@ -6995,12 +7100,83 @@ class Interactions():
                   for k,d in zip(['connectivity','angles','dihedrals','vdw'],
                               [connectivity, angles, dihedrals, vdw])
                  }
+        
+        # Create special_type interactions using the SAME bond pairs as at_type connectivity
+        # but with special_types labels (re-label existing connectivity pairs)
+        # NOTE: We iterate over connectivity (which already has at_type exclusions applied)
+        # and re-label with special_types to ensure pair counts match
+        # Re-label connectivity pairs with special_types
+        special_connectivity = {}
+        for pair_ids, at_type_label in connectivity.items():
+            _, special_label = Interactions.sorted_id_and_type(special_types, pair_ids)
+            special_connectivity[pair_ids] = special_label
+        
+        # Re-label vdw pairs with special_types
+        special_vdw = {}
+        for pair_ids, at_type_label in vdw.items():
+            _, special_label = Interactions.sorted_id_and_type(special_types, pair_ids)
+            special_vdw[pair_ids] = special_label
+        
+        if self.find_angles or self.find_dihedrals:
+            # Re-label angle triples with special_types
+            special_angles = {}
+            for triple_ids, at_type_label in angles.items():
+                _, special_label = Interactions.sorted_id_and_type(special_types, triple_ids)
+                special_angles[triple_ids] = special_label
+            
+            if self.find_dihedrals:
+                # Re-label dihedral quadruplets with special_types
+                special_dihedrals = {}
+                for quad_ids, at_type_label in dihedrals.items():
+                    _, special_label = Interactions.sorted_id_and_type(special_types, quad_ids)
+                    special_dihedrals[quad_ids] = special_label
+            else:
+                special_dihedrals = dict()
+        else:
+            special_angles = dict()
+            special_dihedrals = dict()
+        
+        inters['special_connectivity'] = Interactions.inverse_dictToArraykeys(special_connectivity)
+        inters['special_vdw'] = Interactions.inverse_dictToArraykeys(special_vdw)
+        inters['special_angles'] = Interactions.inverse_dictToArraykeys(special_angles)
+        inters['special_dihedrals'] = Interactions.inverse_dictToArraykeys(special_dihedrals)
+        
+        # Assertion: verify special_types pair counts match base types
+        def verify_special_vs_base(base_dict, special_dict, category):
+            base_total = sum(len(v) for v in base_dict.values())
+            special_total = sum(len(v) for v in special_dict.values())
+            assert base_total == special_total, \
+                f"{category}: base total ({base_total}) != special total ({special_total})"
+            
+            # Also verify that special types map back correctly to base types
+            base_from_special = {}
+            for special_type, pairs in special_dict.items():
+                base_type = Interactions.get_base_type_from_special(special_type)
+                if base_type not in base_from_special:
+                    base_from_special[base_type] = 0
+                base_from_special[base_type] += len(pairs)
+            
+            for base_type, count in base_dict.items():
+                expected = len(count)
+                actual = base_from_special.get(base_type, 0)
+                assert expected == actual, \
+                    f"{category}: base type {base_type} has {expected} pairs but special mapped {actual}"
+        
+        verify_special_vs_base(inters['connectivity'], inters['special_connectivity'], 'connectivity')
+        verify_special_vs_base(inters['vdw'], inters['special_vdw'], 'vdw')
+        verify_special_vs_base(inters['angles'], inters['special_angles'], 'angles')
+        verify_special_vs_base(inters['dihedrals'], inters['special_dihedrals'], 'dihedrals')
+        
         if self.find_densities:
            # print(at_types)
             rhos = Interactions.get_rho_pairs(bond_d_matrix,at_types,self.vdw_bond_dist)
+            special_rhos = Interactions.get_rho_pairs(bond_d_matrix, special_types, self.vdw_bond_dist)
         else:
             rhos = dict()
+            special_rhos = dict()
         inters['rhos'] = rhos
+        inters['special_rhos'] = special_rhos
+        
         if self.atom_model.lower() in ['ua','united-atom','united_atom']:    
             inters = Interactions.clean_hydro_inters(inters)
             
@@ -7034,6 +7210,70 @@ class Interactions():
         dataframe['bodies'] = all_bodies
         dataframe['structs'] = all_structs
         return
+    
+    def print_interaction_info(self, i, category, v='all'):
+        """Print interaction types and their sizes for a given configuration.
+        
+        Parameters
+        ----------
+        i : int
+            iloc index of the configuration in self.data
+        category : str
+            Interaction category to display. Options:
+            'connectivity', 'vdw', 'angles', 'dihedrals', 'rhos',
+            'special_connectivity', 'special_vdw', 'special_angles', 
+            'special_dihedrals', 'special_rhos', or 'all' for all categories.
+        v : str
+            Filter for which types to show:
+            - 'all': show both basic and special types (default)
+            - 'basic': show only basic types (connectivity, vdw, angles, dihedrals, rhos)
+            - 'special': show only special types (special_connectivity, etc.)
+        """
+        inters = self.data.iloc[i]['interactions']
+        
+        basic_categories = ['connectivity', 'vdw', 'angles', 'dihedrals', 'rhos']
+        special_categories = ['special_connectivity', 'special_vdw', 'special_angles', 
+                              'special_dihedrals', 'special_rhos']
+        
+        # Determine which categories to show
+        if category == 'all':
+            if v == 'all':
+                categories_to_show = basic_categories + special_categories
+            elif v == 'basic':
+                categories_to_show = basic_categories
+            elif v == 'special':
+                categories_to_show = special_categories
+            else:
+                raise ValueError(f"v must be 'all', 'basic', or 'special', got '{v}'")
+        else:
+            # Single category specified
+            if v == 'basic' and category.startswith('special_'):
+                print(f"Category '{category}' is a special type but v='basic' was specified.")
+                return
+            elif v == 'special' and not category.startswith('special_'):
+                print(f"Category '{category}' is a basic type but v='special' was specified.")
+                return
+            categories_to_show = [category]
+        
+        print(f"\n{'='*60}")
+        print(f"Interaction Info for iloc={i} (v='{v}')")
+        print(f"{'='*60}")
+        
+        for cat in categories_to_show:
+            if cat not in inters:
+                continue
+            cat_data = inters[cat]
+            if not cat_data:
+                print(f"\n{cat}: (empty)")
+                continue
+                
+            total_pairs = sum(len(pairs) for pairs in cat_data.values())
+            print(f"\n{cat}: {len(cat_data)} types, {total_pairs} total pairs")
+            print("-" * 40)
+            for typ, pairs in cat_data.items():
+                print(f"  {typ}: {len(pairs)} pairs")
+        
+        print(f"\n{'='*60}\n")
     
     @staticmethod
     def activation_function_illustration(r0,rc):
@@ -7210,8 +7450,11 @@ class Interactions():
                             continue
                         if t not in potential_types[intertype]:
                             continue
+                    
+                    # Map special_types to their base intertype for calculation logic
+                    base_intertype = intertype.replace('special_', '') if intertype.startswith('special_') else intertype
                    
-                    if intertype in ['connectivity','vdw']:
+                    if base_intertype in ['connectivity','vdw']:
                         
                         npairs = len(pairs) 
                         
@@ -7239,7 +7482,7 @@ class Interactions():
                         temp = {'values':r, 'partial_ri':partial_ri,
                                 'i_index':i_index,'j_index':j_index}
                         
-                    elif intertype=='angles':
+                    elif base_intertype=='angles':
                         npairs = len(pairs) 
                         
                         angles  = np.empty(npairs, dtype=float)
@@ -7271,7 +7514,7 @@ class Interactions():
                                 'i_index':i_index, 'j_index':j_index,
                                 'k_index': k_index}
                     
-                    elif intertype =='dihedrals':
+                    elif base_intertype =='dihedrals':
                         
                         npairs = len(pairs) 
                         
@@ -7317,7 +7560,7 @@ class Interactions():
                                 'i_index':i_index, 'j_index':j_index,
                                 'k_index': k_index, 'l_index': l_index}
                         
-                    elif intertype=='rhos':
+                    elif base_intertype=='rhos':
                         r0 = self.rho_r0
                         rc = self.rho_rc
                         
@@ -7383,14 +7626,20 @@ class Interactions():
             Dictionary mapping feature (intertype) to set of types used in potential.
             E.g., {'vdw': {('Ag', 'Ag'), ('O', 'O')}, 'angles': {('H', 'O', 'H')}, ...}
             All intertypes are included, even if empty.
+            Includes both regular and special_types interactions.
         """
-        # Initialize all intertypes with empty sets
+        # Initialize all intertypes with empty sets (including special_types)
         potential_types = {
             'connectivity': set(),
             'vdw': set(),
             'angles': set(),
             'dihedrals': set(),
-            'rhos': set()
+            'rhos': set(),
+            'special_connectivity': set(),
+            'special_vdw': set(),
+            'special_angles': set(),
+            'special_dihedrals': set(),
+            'special_rhos': set()
         }
         
         # Try opt_models first, then init_models
@@ -7405,6 +7654,7 @@ class Interactions():
         for name, model in models.items():
             feature = model.feature
             ty = model.type
+            #print('potential_type:', name, feature, ty)
             potential_types[feature].add(ty)
         
         return potential_types
@@ -7459,8 +7709,11 @@ class Interactions():
                             continue
                         if t not in potential_types[intertype]:
                             continue
+                    
+                    # Map special_types to their base intertype for calculation logic
+                    base_intertype = intertype.replace('special_', '') if intertype.startswith('special_') else intertype
                    
-                    if intertype in ['connectivity','vdw']:
+                    if base_intertype in ['connectivity','vdw']:
                         
                         # Vectorized bond calculation
                         pairs_arr = np.array(pairs, dtype=int)
@@ -7476,7 +7729,7 @@ class Interactions():
                         temp = {'values':r, 'partial_ri':partial_ri,
                                 'i_index':i_index,'j_index':j_index}
                         
-                    elif intertype=='angles':
+                    elif base_intertype=='angles':
                         
                         # Vectorized angle calculation
                         pairs_arr = np.array(pairs, dtype=int)
@@ -7494,7 +7747,7 @@ class Interactions():
                                 'i_index':i_index, 'j_index':j_index,
                                 'k_index': k_index}
                     
-                    elif intertype =='dihedrals':
+                    elif base_intertype =='dihedrals':
                         
                         # Vectorized dihedral calculation
                         pairs_arr = np.array(pairs, dtype=int)
@@ -7514,7 +7767,7 @@ class Interactions():
                                 'i_index':i_index, 'j_index':j_index,
                                 'k_index': k_index, 'l_index': l_index}
                         
-                    elif intertype=='rhos':
+                    elif base_intertype=='rhos':
                         r0 = self.rho_r0
                         rc = self.rho_rc
                         c = self.compute_coeff(r0, rc)
@@ -8582,14 +8835,11 @@ class FF_Optimizer(Optimizer):
     @staticmethod
     def UperModelContribution(u_model,dists,dl,du,model_pars,*model_args):
         """Compute energy contribution from a single model for all data points."""
-        Up = np.empty((dl.shape[0]), dtype=np.float64)
         pobj = u_model(dists,model_pars,*model_args)
         U = pobj.u_vectorized()
-        #U = u_model(*a)
         
-        for i in range(Up.size):
-            ui = U[dl[i] : du[i]].sum() #if du[i] -dl[i]>0 else 0
-            Up[i] = ui 
+        # Use JIT-compiled parallel summation
+        Up = _sum_energy_segments(U, dl, du, dl.shape[0])
         
         return Up
    
@@ -8598,14 +8848,12 @@ class FF_Optimizer(Optimizer):
         """Compute gradient of energy contribution w.r.t. parameters."""
         n_p = model_pars.shape[0]
         data_size = dl.shape[0]
-        gu = np.empty((n_p,data_size), dtype=np.float64)
         
         pobj = u_model(dists,model_pars,*model_args)
         g = pobj.find_gradient() # shape = (n_p, dists.shape[0]) # dists.shape[0] == all the values serialized
-
-        for j in range(n_p):
-            for i in range(data_size):
-                gu[j][i] = g[j][dl[i] : du[i]].sum()
+        
+        # Use JIT-compiled parallel summation
+        gu = _sum_gradient_segments(g, dl, du, n_p, data_size)
         
         return gu
     
@@ -9237,13 +9485,17 @@ class FF_Optimizer(Optimizer):
                      reg, reguls,
                      measure,reg_measure,
                      force_filter=None,
-                     mu_e =0.0, std_e=1.0,
-                     mu_f = 0.0, std_f=1.0):
+                     measure_params=None,
+                     mu_e = 0.0, std_e=1.0,
+                     mu_f = 0.0, std_f=1.0,
+                     weights=None):
         """Compute total cost combining energy, force, and regularization terms."""
         
-        cE = CostFunctions.Energy(params, Energy, models_list_info, measure, mu_e,std_e)
+        if measure_params is None:
+            measure_params = {}
+        cE = CostFunctions.Energy(params, Energy, models_list_info, measure, mu_e,std_e, weights, measure_params)
         cR = reg*CostFunctions.Regularization(params,reguls,reg_measure) 
-        cF = CostFunctions.Forces(params, Forces, models_list_info, measure, mu_f,std_f, force_filter) 
+        cF = CostFunctions.Forces(params, Forces, models_list_info, measure, mu_f,std_f, force_filter, measure_params) 
         cost = (1.0-lambda_force)*cE + lambda_force*cF + cR
         return cost
     
@@ -9253,12 +9505,16 @@ class FF_Optimizer(Optimizer):
                 reg,reguls,
                 measure,reg_measure,
                 force_filter=None,
+                measure_params=None,
                 mu_e =0.0, std_e=1.0,
-                mu_f = 0.0, std_f=1.0):
+                mu_f = 0.0, std_f=1.0,
+                weights=None):
         """Compute gradient of total cost w.r.t. parameters."""
-        gradE = CostFunctions.gradEnergy(params, Energy, models_list_info, measure, mu_e,std_e)
+        if measure_params is None:
+            measure_params = {}
+        gradE = CostFunctions.gradEnergy(params, Energy, models_list_info, measure, mu_e,std_e, weights, measure_params)
         gradR = reg*CostFunctions.gradRegularization(params,reguls,reg_measure) 
-        gradF = CostFunctions.gradForces(params, Forces, models_list_info, measure, mu_f,std_f, force_filter) 
+        gradF = CostFunctions.gradForces(params, Forces, models_list_info, measure, mu_f,std_f, force_filter, measure_params) 
         grads =  (1.0-lambda_force)*gradE + lambda_force*gradF + gradR
         
         return grads
@@ -9671,7 +9927,7 @@ class FF_Optimizer(Optimizer):
         
         return Forces, force_filter
     
-    def get_params_n_args(self,setfrom,dataset):
+    def get_params_n_args(self,setfrom,dataset,return_weights=False):
         """Prepare parameters and arguments for optimization."""
         
         E = self.get_Energy(dataset)
@@ -9698,8 +9954,15 @@ class FF_Optimizer(Optimizer):
                 self.setup.reg_par, reguls,
                 self.setup.costf,
                 self.setup.regularization_method,
-                force_filter)
+                force_filter,
+                self.setup.costf_params)
         
+        if return_weights:
+            # Compute weights for the requested dataset
+            data_for_weights = getattr(self, f'data_{dataset}')
+            w = GeneralFunctions.weighting(data_for_weights,
+                    self.setup.weighting_method, self.setup.bT, self.setup.w)
+            return params, bounds, args, fixed_parameters, isnot_fixed, w
         return params, bounds, args, fixed_parameters, isnot_fixed
 
     def pareto_via_scan(self,setfrom='init'):
@@ -9708,18 +9971,21 @@ class FF_Optimizer(Optimizer):
         nrandom, npareto = self.setup.random_initializations, self.setup.npareto
         tol = self.setup.tolerance
 
-        params, bounds,  args, fixed_parameters, isnot_fixed = self.get_params_n_args(setfrom,'train')
+        params, bounds,  args, fixed_parameters, isnot_fixed, train_weights = self.get_params_n_args(setfrom,'train',return_weights=True)
         
         (Energy,Forces, lambda_force,models_list_info, 
                  reg_par, reguls,
                  measure,
                  measure_reg,
-                 force_filter) = args
+                 force_filter,
+                 measure_params) = args
         
         normalize_data = self.setup.normalize_data
         if normalize_data:
             mu_e, std_e, mu_f, std_f = self.get_normalized_data('train')
-            args = (*args, mu_e, std_e, mu_f, std_f)
+            args = (*args, mu_e, std_e, mu_f, std_f, train_weights)
+        else:
+            args = (*args, 0.0, 1.0, 0.0, 1.0, train_weights)
         if params.shape[0] >0 and self.setup.optimize :
             self.randomize = True
             best_params, success, best_iter = params,  False,0
@@ -9800,7 +10066,8 @@ class FF_Optimizer(Optimizer):
                  reg_par, reguls,
                  measure,
                  measure_reg,
-                 force_filter) = args
+                 force_filter,
+                 measure_params) = args
         
         args_energy = (Energy, models_list_info, reg_par, reguls, measure, measure_reg)
         #args_forces = (Forces, models_list_info, reg_par, reguls, measure, measure_reg)
@@ -9916,9 +10183,9 @@ class FF_Optimizer(Optimizer):
             return 
     @staticmethod
     def costEnergy(params,Energy, models_list_info, 
-                   reg_par, reguls, measure, measure_reg, mu_e=0, std_e=0):
+                   reg_par, reguls, measure, measure_reg, mu_e=0, std_e=0, weights=None):
         """Compute energy cost with regularization."""
-        cE = CostFunctions.Energy(params, Energy, models_list_info, measure, mu_e,std_e)
+        cE = CostFunctions.Energy(params, Energy, models_list_info, measure, mu_e,std_e, weights)
         cR = reg_par*CostFunctions.Regularization(params,reguls,measure_reg) 
         return cE + cR
     
@@ -9944,9 +10211,9 @@ class FF_Optimizer(Optimizer):
     
     @staticmethod
     def gradEnergy(params,Energy, models_list_info, 
-                   reg_par, reguls, measure, measure_reg, mu_e=0, std_e=0):
+                   reg_par, reguls, measure, measure_reg, mu_e=0, std_e=0, weights=None):
         """Gradient of energy cost with regularization."""
-        gE = CostFunctions.gradEnergy(params, Energy, models_list_info, measure, mu_e,std_e)
+        gE = CostFunctions.gradEnergy(params, Energy, models_list_info, measure, mu_e,std_e, weights)
         gR = reg_par*CostFunctions.gradRegularization(params,reguls,measure_reg) 
         return gE + gR
     
@@ -9967,15 +10234,16 @@ class FF_Optimizer(Optimizer):
         tol = self.setup.tolerance
         maxiter = self.setup.maxiter
         
-        params, bounds,  args, fixed_parameters, isnot_fixed = self.get_params_n_args(setfrom,'train')
+        params, bounds,  args, fixed_parameters, isnot_fixed, train_weights = self.get_params_n_args(setfrom,'train',return_weights=True)
         
         n_train = args[0].shape[0]
 
         normalize_data = self.setup.normalize_data
         if normalize_data:
             mu_e, std_e, mu_f, std_f = self.get_normalized_data('train')
-
-            args = (*args, mu_e, std_e, mu_f,std_f ) 
+            args = (*args, mu_e, std_e, mu_f, std_f, train_weights)
+        else:
+            args = (*args, 0.0, 1.0, 0.0, 1.0, train_weights) 
         try:
             self.randomize
         
@@ -10192,24 +10460,30 @@ class FF_Optimizer(Optimizer):
                     batch_end = min(batch_start + batch_size, n_total)
                     self.train_indexes = total_train_indexes[batch_start:batch_end]
                     
-                    _, _, batch_args, _, _ = self.get_params_n_args('init', 'train')
+                    _, _, batch_args, _, _, batch_weights = self.get_params_n_args('init', 'train', return_weights=True)
                     if normalize_data:
                         mu_e, std_e, mu_f, std_f = self.get_normalized_data('train')
-                        batch_args = (*batch_args, mu_e, std_e, mu_f, std_f)
+                        batch_args = (*batch_args, mu_e, std_e, mu_f, std_f, batch_weights)
+                    else:
+                        batch_args = (*batch_args, 0.0, 1.0, 0.0, 1.0, batch_weights)
                     batch_args_dict[batch_idx] = batch_args
                 
-                # Pre-compute full training set args
+                # Pre-compute full training set args (with weights for training cost)
                 self.train_indexes = total_train_indexes
-                _, _, full_args, _, _ = self.get_params_n_args('init', 'train')
+                _, _, full_args, _, _, full_weights = self.get_params_n_args('init', 'train', return_weights=True)
                 if normalize_data:
                     mu_e, std_e, mu_f, std_f = self.get_normalized_data('train')
-                    full_args = (*full_args, mu_e, std_e, mu_f, std_f)
+                    full_args = (*full_args, mu_e, std_e, mu_f, std_f, full_weights)
+                else:
+                    full_args = (*full_args, 0.0, 1.0, 0.0, 1.0, full_weights)
                 
-                # Pre-compute dev set args for best model selection
-                _, _, dev_args, _, _ = self.get_params_n_args('init', 'dev')
+                # Pre-compute dev set args for best model selection (with weights for evaluation)
+                _, _, dev_args, _, _, dev_weights = self.get_params_n_args('init', 'dev', return_weights=True)
                 if normalize_data:
                     mu_e, std_e, mu_f, std_f = self.get_normalized_data('dev')
-                    dev_args = (*dev_args, mu_e, std_e, mu_f, std_f)
+                    dev_args = (*dev_args, mu_e, std_e, mu_f, std_f, dev_weights)
+                else:
+                    dev_args = (*dev_args, 0.0, 1.0, 0.0, 1.0, dev_weights)
                 
                 n_batches = len(batch_args_dict)
                 print(f'SGD: Pre-computed {n_batches} batches, starting optimization...')
@@ -10333,24 +10607,30 @@ class FF_Optimizer(Optimizer):
                     batch_end = min(batch_start + batch_size, n_total)
                     self.train_indexes = total_train_indexes[batch_start:batch_end]
                     
-                    _, _, batch_args, _, _ = self.get_params_n_args('init', 'train')
+                    _, _, batch_args, _, _, batch_weights = self.get_params_n_args('init', 'train', return_weights=True)
                     if normalize_data:
                         mu_e, std_e, mu_f, std_f = self.get_normalized_data('train')
-                        batch_args = (*batch_args, mu_e, std_e, mu_f, std_f)
+                        batch_args = (*batch_args, mu_e, std_e, mu_f, std_f, batch_weights)
+                    else:
+                        batch_args = (*batch_args, 0.0, 1.0, 0.0, 1.0, batch_weights)
                     batch_args_dict[batch_idx] = batch_args
                 
-                # Pre-compute full training set args
+                # Pre-compute full training set args (with weights for training cost)
                 self.train_indexes = total_train_indexes
-                _, _, full_args, _, _ = self.get_params_n_args('init', 'train')
+                _, _, full_args, _, _, full_weights = self.get_params_n_args('init', 'train', return_weights=True)
                 if normalize_data:
                     mu_e, std_e, mu_f, std_f = self.get_normalized_data('train')
-                    full_args = (*full_args, mu_e, std_e, mu_f, std_f)
+                    full_args = (*full_args, mu_e, std_e, mu_f, std_f, full_weights)
+                else:
+                    full_args = (*full_args, 0.0, 1.0, 0.0, 1.0, full_weights)
                 
-                # Pre-compute dev set args for best model selection
-                _, _, dev_args, _, _ = self.get_params_n_args('init', 'dev')
+                # Pre-compute dev set args for best model selection (with weights for evaluation)
+                _, _, dev_args, _, _, dev_weights = self.get_params_n_args('init', 'dev', return_weights=True)
                 if normalize_data:
                     mu_e, std_e, mu_f, std_f = self.get_normalized_data('dev')
-                    dev_args = (*dev_args, mu_e, std_e, mu_f, std_f)
+                    dev_args = (*dev_args, mu_e, std_e, mu_f, std_f, dev_weights)
+                else:
+                    dev_args = (*dev_args, 0.0, 1.0, 0.0, 1.0, dev_weights)
                 
                 n_batches = len(batch_args_dict)
                 print(f'Adam: Pre-computed {n_batches} batches, starting optimization...')
@@ -10537,7 +10817,8 @@ class FF_Optimizer(Optimizer):
                  reg_par, reguls,
                  measure,
                  measure_reg,
-                 force_filter) = args
+                 force_filter,
+                 measure_params) = args
         
            
         normalize = self.setup.normalize_data
@@ -10553,9 +10834,12 @@ class FF_Optimizer(Optimizer):
              reg_par, reguls,
              measure,
              measure_reg,
-             force_filter) = args
+             force_filter,
+             measure_params) = args
 
-            for meas in np.unique(['MAE','MSE',measure]):
+            for meas in np.unique(['MAE', measure]):  # Only log MAE and the actual costf (not MSE by default)
+                # Only apply measure_params for the actual costf, not for MAE
+                meas_params = measure_params if meas == measure else {}
                 for norm in ['','norm_']:
                     if normalize and norm =='norm_':
                         mu_e, std_e, mu_f, std_f = self.get_normalized_data(dataname) # IT GIVES BY DEFAULT train data mu, std but indexing refers to dataname (To have combatiple arrays)
@@ -10563,8 +10847,8 @@ class FF_Optimizer(Optimizer):
                         mu_e, std_e, mu_f, std_f = 0.0, 1.0, 0.0, 1.0
                     
                     creg = CostFunctions.Regularization(params,reguls, measure_reg)
-                    ce = CostFunctions.Energy(params, Energy, models_list_info, meas, mu_e, std_e)
-                    cf = CostFunctions.Forces(params, Forces, models_list_info, meas, mu_f, std_f, force_filter)
+                    ce = CostFunctions.Energy(params, Energy, models_list_info, meas, mu_e, std_e, None, meas_params)
+                    cf = CostFunctions.Forces(params, Forces, models_list_info, meas, mu_f, std_f, force_filter, meas_params)
                     
                     prefix = norm + meas+'_'+dataname+'_' 
                     setattr(costs,prefix + 'energy',  ce)
@@ -10685,6 +10969,99 @@ class measures:
         """Mean squared error."""
         u = u1 -u2
         return np.sum(w*u*u)/u2.size
+    
+    @staticmethod
+    def aMSE(u1, u2, w=1):
+        """Asymmetric MSE that penalizes underprediction more.
+        
+        When u1 < u2 (prediction < true): error is scaled by alpha.
+        This discourages the model from underfitting high-energy regions.
+        
+        Parameters
+        ----------
+        u1 : array
+            Predicted values (Uclass)
+        u2 : array
+            True values (Energy)
+        w : float or array
+            Weights (default 1)
+        """
+        u = u1 - u2
+        # Where prediction < true (underfitting), apply alpha penalty
+        weights = np.where(u > 0, w, 4.0)
+        return np.sum(weights * u * u) / u2.size
+    
+    @staticmethod
+    def grad_aMSE(u1, u2, w=1):
+        """Gradient of asymmetric MSE."""
+        u = u1 - u2
+        weights = np.where(u > 0, w, 4.0)
+        return 2 *  weights * u / u2.size
+    
+    @staticmethod
+    def sMSE(u1, u2, w=1, lam=0.3):
+        """Symmetric MSE with skewness penalty to encourage Gaussian errors.
+        
+        Loss = MSE + λ * skewness²
+        
+        Parameters
+        ----------
+        u1 : array
+            Predicted values (Uclass)
+        u2 : array
+            True values (Energy)
+        w : float or array
+            Weights (default 1)
+        lam : float
+            Skewness penalty weight (default 0.3)
+        """
+        u = u1 - u2
+        n = u.size
+        mse = np.sum(w * u * u) / n
+        
+        # Compute skewness: E[(u - mean)³] / std³
+        mean_u = np.mean(u)
+        std_u = np.std(u) + 1e-8  # avoid division by zero
+        skew = np.mean((u - mean_u)**3) / (std_u**3)
+        
+        return mse + lam * skew**2
+    
+    @staticmethod
+    def grad_sMSE(u1, u2, w=1, lam=0.3):
+        """Gradient of symmetric MSE with skewness penalty.
+        
+        d/du1 [MSE + λ * skew²]
+        """
+        u = u1 - u2
+        n = u.size
+        
+        # MSE gradient
+        grad_mse = 2 * w * u / n
+        
+        # Skewness gradient
+        mean_u = np.mean(u)
+        std_u = np.std(u) + 1e-8
+        centered = u - mean_u
+        m3 = np.mean(centered**3)
+        skew = m3 / (std_u**3)
+        
+        # d(skew)/du = d/du [m3 / std³]
+        # m3 = mean(centered³), std² = mean(centered²)
+        # Using chain rule:
+        # d(m3)/du_i = 3*centered_i² * (1/n - 1/n) + 3*centered_i²/n = 3*centered_i²/n (approx)
+        # Full derivative accounting for mean shift:
+        dm3_du = 3 * centered**2 / n - 3 * np.mean(centered**2) / n
+        
+        # d(std³)/du = 3*std² * d(std)/du = 3*std² * centered/(n*std) = 3*std*centered/n
+        dstd3_du = 3 * std_u**2 * centered / (n * std_u)
+        
+        # d(skew)/du = (dm3*std³ - m3*dstd3) / std⁶
+        dskew_du = (dm3_du * std_u**3 - m3 * dstd3_du) / (std_u**6)
+        
+        # d(skew²)/du = 2*skew*dskew_du
+        grad_skew_penalty = 2 * skew * dskew_du
+        
+        return grad_mse + lam * grad_skew_penalty
     
     @staticmethod
     def MSEo(u1,u2,w=1):
@@ -11182,17 +11559,20 @@ class mappers():
 
 class CostFunctions():
     """Static methods for computing cost functions and their gradients."""
-    def Energy(params, Energy, models_list_info, measure, mu=0.0,std=1.0):
+    def Energy(params, Energy, models_list_info, measure, mu=0.0,std=1.0, weights=None, measure_params=None):
         """Compute energy cost using the specified measure."""
         ne = Energy.shape[0]
         
         Uclass = FF_Optimizer.computeUclass(params,ne,models_list_info)
         
         func = getattr(measures,measure)
-        ce = func(  (Uclass-mu)/std, (Energy-mu)/std )
+        w = 1 if weights is None else weights
+        if measure_params is None:
+            measure_params = {}
+        ce = func(  (Uclass-mu)/std, (Energy-mu)/std, w, **measure_params )
         return ce
     
-    def gradEnergy(params, Energy, models_list_info, measure, mu=0.0, std=1.0):
+    def gradEnergy(params, Energy, models_list_info, measure, mu=0.0, std=1.0, weights=None, measure_params=None):
         """Compute gradient of energy cost w.r.t. parameters."""
         ne = Energy.shape[0]
         
@@ -11200,17 +11580,22 @@ class CostFunctions():
         gradU = FF_Optimizer.gradUclass(params,ne,models_list_info)
         
         func = getattr(measures,'grad_'+measure)
-        grad = np.sum( func( (Uclass-mu)/std, (Energy-mu)/std ) * gradU/std, axis = 1)
+        w = 1 if weights is None else weights
+        if measure_params is None:
+            measure_params = {}
+        grad = np.sum( func( (Uclass-mu)/std, (Energy-mu)/std, w, **measure_params ) * gradU/std, axis = 1)
         
         return grad 
     
-    def Forces(params,Forces_True, models_list_info, measure, mu=0.0,std=1.0, force_filter=None):
+    def Forces(params,Forces_True, models_list_info, measure, mu=0.0,std=1.0, force_filter=None, measure_params=None):
         """Compute force cost using the specified measure.
         
         Parameters
         ----------
         force_filter : numpy.ndarray[bool], optional
             Boolean filter where True means include in cost calculation.
+        measure_params : dict, optional
+            Additional hyperparameters for the measure function.
         """
         n_forces = Forces_True.shape[0]
         
@@ -11222,16 +11607,20 @@ class CostFunctions():
             Forces_True = Forces_True[force_filter]
         
         func = getattr(measures,measure)
-        cf = func( (Forces-mu)/std, (Forces_True-mu)/std )
+        if measure_params is None:
+            measure_params = {}
+        cf = func( (Forces-mu)/std, (Forces_True-mu)/std, 1, **measure_params )
         return cf 
     
-    def gradForces(params,Forces_True, models_list_info, measure, mu=0.0, std=1.0, force_filter=None):
+    def gradForces(params,Forces_True, models_list_info, measure, mu=0.0, std=1.0, force_filter=None, measure_params=None):
         """Compute gradient of force cost w.r.t. parameters.
         
         Parameters
         ----------
         force_filter : numpy.ndarray[bool], optional
             Boolean filter where True means include in cost calculation.
+        measure_params : dict, optional
+            Additional hyperparameters for the measure function.
         """
         n_forces = Forces_True.shape[0]
         
@@ -11247,8 +11636,9 @@ class CostFunctions():
             Forces_True_filtered = Forces_True
         
         func = getattr(measures,'grad_'+measure)
-        
-        grad = np.sum( func( (Forces -mu)/std, (Forces_True_filtered-mu)/std ) * gradF/std, axis = (1,2) )
+        if measure_params is None:
+            measure_params = {}
+        grad = np.sum( func( (Forces -mu)/std, (Forces_True_filtered-mu)/std, 1, **measure_params ) * gradF/std, axis = (1,2) )
         return grad
     
     def Regularization(params,reguls,reg_measure):
