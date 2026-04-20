@@ -9589,26 +9589,14 @@ class FF_Optimizer(Optimizer):
                 measure_params=None,
                 mu_e =0.0, std_e=1.0,
                 mu_f = 0.0, std_f=1.0,
-                weights=None,
-                _debug_timing=False):
+                weights=None):
         """Compute gradient of total cost w.r.t. parameters."""
         if measure_params is None:
             measure_params = {}
-        if _debug_timing:
-            t0 = perf_counter()
         gradE = CostFunctions.gradEnergy(params, Energy, models_list_info, measure, mu_e,std_e, weights, measure_params)
-        if _debug_timing:
-            t1 = perf_counter()
         gradR = reg*CostFunctions.gradRegularization(params,reguls,reg_measure) 
-        if _debug_timing:
-            t2 = perf_counter()
-        gradF = CostFunctions.gradForces(params, Forces, models_list_info, measure, mu_f,std_f, force_filter, measure_params, _debug_timing=_debug_timing) 
-        if _debug_timing:
-            t3 = perf_counter()
+        gradF = CostFunctions.gradForces(params, Forces, models_list_info, measure, mu_f,std_f, force_filter, measure_params) 
         grads =  (1.0-lambda_force)*gradE + lambda_force*gradF + gradR
-        if _debug_timing:
-            t4 = perf_counter()
-            print(f"    gradCost: E={1000*(t1-t0):.1f}ms, R={1000*(t2-t1):.1f}ms, F={1000*(t3-t2):.1f}ms, sum={1000*(t4-t3):.1f}ms")
         
         return grads
     
@@ -10743,16 +10731,14 @@ class FF_Optimizer(Optimizer):
                     t_batches = perf_counter()
                     t_grad_total = 0.0
                     t_update_total = 0.0
-                    for ib, batch_idx in enumerate(batch_order):
+                    for batch_idx in batch_order:
                         batch_args = batch_args_dict[batch_idx]
                         
                         t += 1
                         
                         # Compute gradient on batch
                         t_grad = perf_counter()
-                        # Debug timing on first batch of logged epochs
-                        _dt = (epoch % log_every == 0 or epoch < log_every) and ib == 0
-                        grad = self.gradCost(params, *batch_args, _debug_timing=_dt)
+                        grad = self.gradCost(params, *batch_args)
                         t_grad_total += perf_counter() - t_grad
                         
                         # Update biased first moment estimate
@@ -11725,7 +11711,7 @@ class CostFunctions():
         cf = func( (Forces-mu)/std, (Forces_True-mu)/std, 1, **measure_params )
         return cf 
     
-    def gradForces(params,Forces_True, models_list_info, measure, mu=0.0, std=1.0, force_filter=None, measure_params=None, _debug_timing=False):
+    def gradForces(params,Forces_True, models_list_info, measure, mu=0.0, std=1.0, force_filter=None, measure_params=None):
         """Compute gradient of force cost w.r.t. parameters.
         
         Parameters
@@ -11737,11 +11723,8 @@ class CostFunctions():
         """
         n_forces = Forces_True.shape[0]
         
-        if _debug_timing: t0 = perf_counter()
         Forces = FF_Optimizer.computeForceClass(params,n_forces,models_list_info)
-        if _debug_timing: t1 = perf_counter()
         gradF = FF_Optimizer.computeGradForceClass(params,n_forces,models_list_info)
-        if _debug_timing: t2 = perf_counter()
         
         # Apply force filter if provided
         if force_filter is not None:
@@ -11751,14 +11734,10 @@ class CostFunctions():
         else:
             Forces_True_filtered = Forces_True
         
-        if _debug_timing: t3 = perf_counter()
         func = getattr(measures,'grad_'+measure)
         if measure_params is None:
             measure_params = {}
         grad = np.sum( func( (Forces -mu)/std, (Forces_True_filtered-mu)/std, 1, **measure_params ) * gradF/std, axis = (1,2) )
-        if _debug_timing:
-            t4 = perf_counter()
-            print(f"      gradForces: computeF={1000*(t1-t0):.1f}ms, computeGradF={1000*(t2-t1):.1f}ms, filter={1000*(t3-t2):.1f}ms, np.sum={1000*(t4-t3):.1f}ms")
         return grad
     
     def Regularization(params,reguls,reg_measure):
