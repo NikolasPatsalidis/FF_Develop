@@ -8980,56 +8980,120 @@ class FF_Optimizer(Optimizer):
         return Uclass_grad
     
     @staticmethod
-    def computeForceClass(params, n_forces, models_list_info):
-        """Compute total classical forces for all atoms."""
-
-        Forces_tot =  np.zeros( ( n_forces ,3), dtype=np.float64) 
+    def _compute_model_forces(args):
+        """Helper to compute forces from a single model (for parallel execution)."""
+        model_info, objparams, n_forces = args
+        model_pars = FF_Optimizer.array_model_parameters(
+            objparams, model_info.fixed_params, model_info.isnot_fixed
+        )
+        Forces = np.zeros((n_forces, 3), dtype=np.float64)
+        FF_Optimizer.ForcesPerModel(Forces, model_pars, model_info)
+        return Forces
+    
+    @staticmethod
+    def computeForceClass(params, n_forces, models_list_info, n_workers=None):
+        """Compute total classical forces for all atoms.
+        
+        Parameters
+        ----------
+        params : np.ndarray
+            Flattened array of optimizable parameters.
+        n_forces : int
+            Number of atoms (force vectors).
+        models_list_info : list
+            List of Model_Info objects for each potential term.
+        n_workers : int, optional
+            Number of parallel workers. If None or 1, runs sequentially.
+            
+        Returns
+        -------
+        Forces_tot : np.ndarray
+            Total forces of shape (n_forces, 3).
+        """
+        # Pre-compute param slices for each model
+        param_slices = []
         npars_old = 0
         for model_info in models_list_info:
-            Forces =  np.zeros( (  n_forces ,3), dtype=np.float64)   
-            #t0 = perf_counter()
-           
-            npars_new = npars_old  + model_info.n_notfixed
-            
-            objparams = params[ npars_old : npars_new ]
-            model_pars = FF_Optimizer.array_model_parameters(objparams,
-                                                    model_info.fixed_params,
-                                                    model_info.isnot_fixed,
-                                                    )
-            
-            FF_Optimizer.ForcesPerModel(Forces, model_pars, model_info)
-            
-            
+            npars_new = npars_old + model_info.n_notfixed
+            objparams = params[npars_old:npars_new]
+            param_slices.append((model_info, objparams, n_forces))
             npars_old = npars_new
+        
+        # Sequential execution if n_workers is None or 1
+        if n_workers is None or n_workers <= 1 or len(models_list_info) <= 1:
+            Forces_tot = np.zeros((n_forces, 3), dtype=np.float64)
+            for args in param_slices:
+                Forces_tot += FF_Optimizer._compute_model_forces(args)
+            return Forces_tot
+        
+        # Parallel execution
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            results = list(executor.map(FF_Optimizer._compute_model_forces, param_slices))
+        
+        # Sum all contributions
+        Forces_tot = np.zeros((n_forces, 3), dtype=np.float64)
+        for Forces in results:
             Forces_tot += Forces
-
         return Forces_tot
     
     @staticmethod
-    def computeGradForceClass(params, n_forces, models_list_info):
-        """Compute gradient of classical forces w.r.t. all parameters."""
+    def _compute_model_forces_grad(args):
+        """Helper to compute force gradient from a single model (for parallel execution)."""
+        model_info, objparams, npars_old, npars_new = args
+        model_pars = FF_Optimizer.array_model_parameters(
+            objparams, model_info.fixed_params, model_info.isnot_fixed
+        )
+        gradForces = np.zeros((model_info.n_pars, model_info.n_forces, 3), dtype=np.float64)
+        FF_Optimizer.gradForcesPerModel(gradForces, model_pars, model_info)
+        return (npars_old, npars_new, gradForces[model_info.isnot_fixed])
+    
+    @staticmethod
+    def computeGradForceClass(params, n_forces, models_list_info, n_workers=None):
+        """Compute gradient of classical forces w.r.t. all parameters.
         
-        gradForces_tot =  np.zeros( (params.shape[0], n_forces ,3), dtype=np.float64) 
+        Parameters
+        ----------
+        params : np.ndarray
+            Flattened array of optimizable parameters.
+        n_forces : int
+            Number of atoms (force vectors).
+        models_list_info : list
+            List of Model_Info objects for each potential term.
+        n_workers : int, optional
+            Number of parallel workers. If None or 1, runs sequentially.
+            
+        Returns
+        -------
+        gradForces_tot : np.ndarray
+            Gradient of shape (n_params, n_forces, 3).
+        """
+        n_p = params.shape[0]
+        
+        # Pre-compute param slices for each model
+        param_slices = []
         npars_old = 0
         for model_info in models_list_info:
-            gradForces =  np.zeros( ( model_info.n_pars,  n_forces ,3),
-                               dtype=np.float64)   
-            #t0 = perf_counter()
-           
-            npars_new = npars_old  + model_info.n_notfixed
-            
-            objparams = params[ npars_old : npars_new ]
-            model_pars = FF_Optimizer.array_model_parameters(objparams,
-                                                    model_info.fixed_params,
-                                                    model_info.isnot_fixed,
-                                                    )
-            
-            FF_Optimizer.gradForcesPerModel(gradForces, model_pars, model_info)
-            
-            gradForces_tot[npars_old: npars_new] = gradForces[model_info.isnot_fixed]
-            
+            npars_new = npars_old + model_info.n_notfixed
+            objparams = params[npars_old:npars_new]
+            param_slices.append((model_info, objparams, npars_old, npars_new))
             npars_old = npars_new
-            
+        
+        # Sequential execution if n_workers is None or 1
+        if n_workers is None or n_workers <= 1 or len(models_list_info) <= 1:
+            gradForces_tot = np.zeros((n_p, n_forces, 3), dtype=np.float64)
+            for args in param_slices:
+                npars_old, npars_new, gf = FF_Optimizer._compute_model_forces_grad(args)
+                gradForces_tot[npars_old:npars_new] = gf
+            return gradForces_tot
+        
+        # Parallel execution
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            results = list(executor.map(FF_Optimizer._compute_model_forces_grad, param_slices))
+        
+        # Assemble results
+        gradForces_tot = np.zeros((n_p, n_forces, 3), dtype=np.float64)
+        for npars_old, npars_new, gf in results:
+            gradForces_tot[npars_old:npars_new] = gf
         return gradForces_tot
     
     @staticmethod
