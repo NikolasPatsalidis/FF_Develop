@@ -8931,9 +8931,9 @@ class FF_Optimizer(Optimizer):
         """Compute total classical energy for all data points."""
         Uclass = np.zeros(ne,dtype=float)
         npars_old = 0
-        timings = []
+        #timings = []
         for minf in models_list_info:
-            t0 = perf_counter()
+            #t0 = perf_counter()
             npars_new = npars_old  + minf.n_notfixed
             
             objparams = params[ npars_old : npars_new ]
@@ -8946,12 +8946,12 @@ class FF_Optimizer(Optimizer):
                     minf.dists, minf.dl, minf.du,
                     model_pars, *minf.model_args)
             Uclass += Utemp
-            timings.append((minf.name, perf_counter()-t0, minf.dists.shape[0]))
+            #timings.append((minf.name, perf_counter()-t0, minf.dists.shape[0]))
             npars_old = npars_new
-        print("computeUclass timing:")
-        for name, dt, ndists in timings:
-            print(f"  {name}: {dt*1000:.2f}ms ({ndists} dists)")
-        print(f"  TOTAL: {sum(t for _,t,_ in timings)*1000:.2f}ms")
+        #print("computeUclass timing:")
+        #for name, dt, ndists in timings:
+        #    print(f"  {name}: {dt*1000:.2f}ms ({ndists} dists)")
+        #print(f"  TOTAL: {sum(t for _,t,_ in timings)*1000:.2f}ms")
         return Uclass
     
     @staticmethod
@@ -8960,9 +8960,9 @@ class FF_Optimizer(Optimizer):
         n_p = params.shape[0]
         Uclass_grad = np.zeros((n_p,ne), dtype=np.float64)
         npars_old = 0
-        timings = []
+        #timings = []
         for minf in models_list_info:
-            t0 = perf_counter()
+            #t0 = perf_counter()
             npars_new = npars_old  + minf.n_notfixed
             
             objparams = params[ npars_old : npars_new ]
@@ -8977,12 +8977,12 @@ class FF_Optimizer(Optimizer):
                     model_pars, *minf.model_args)
 
             Uclass_grad[npars_old: npars_new] = gu[minf.isnot_fixed]
-            timings.append((minf.name, perf_counter()-t0, minf.dists.shape[0]))
+            #timings.append((minf.name, perf_counter()-t0, minf.dists.shape[0]))
             npars_old = npars_new
-        print("gradUclass timing:")
-        for name, dt, ndists in timings:
-            print(f"  {name}: {dt*1000:.2f}ms ({ndists} dists)")
-        print(f"  TOTAL: {sum(t for _,t,_ in timings)*1000:.2f}ms")
+        #print("gradUclass timing:")
+        #for name, dt, ndists in timings:
+        #    print(f"  {name}: {dt*1000:.2f}ms ({ndists} dists)")
+        #print(f"  TOTAL: {sum(t for _,t,_ in timings)*1000:.2f}ms")
         return Uclass_grad
     
     @staticmethod
@@ -8991,9 +8991,9 @@ class FF_Optimizer(Optimizer):
 
         Forces_tot =  np.zeros( ( n_forces ,3), dtype=np.float64) 
         npars_old = 0
-        timings = []
+        #timings = []
         for model_info in models_list_info:
-            t0 = perf_counter()
+            #t0 = perf_counter()
             Forces =  np.zeros( (  n_forces ,3), dtype=np.float64)   
            
             npars_new = npars_old  + model_info.n_notfixed
@@ -9008,12 +9008,12 @@ class FF_Optimizer(Optimizer):
             
             npars_old = npars_new
             Forces_tot += Forces
-            timings.append((model_info.name, perf_counter()-t0, model_info.dists.shape[0]))
+            #timings.append((model_info.name, perf_counter()-t0, model_info.dists.shape[0]))
 
-        print("computeForceClass timing:")
-        for name, dt, ndists in timings:
-            print(f"  {name}: {dt*1000:.2f}ms ({ndists} dists)")
-        print(f"  TOTAL: {sum(t for _,t,_ in timings)*1000:.2f}ms")
+        #print("computeForceClass timing:")
+        #for name, dt, ndists in timings:
+        #    print(f"  {name}: {dt*1000:.2f}ms ({ndists} dists)")
+        #print(f"  TOTAL: {sum(t for _,t,_ in timings)*1000:.2f}ms")
         return Forces_tot
     
     @staticmethod
@@ -9022,9 +9022,9 @@ class FF_Optimizer(Optimizer):
         
         gradForces_tot =  np.zeros( (params.shape[0], n_forces ,3), dtype=np.float64) 
         npars_old = 0
-        timings = []
+        #timings = []
         for model_info in models_list_info:
-            t0 = perf_counter()
+            #t0 = perf_counter()
             gradForces =  np.zeros( ( model_info.n_pars,  n_forces ,3),
                                dtype=np.float64)   
            
@@ -9039,13 +9039,13 @@ class FF_Optimizer(Optimizer):
             FF_Optimizer.gradForcesPerModel(gradForces, model_pars, model_info)
             
             gradForces_tot[npars_old: npars_new] = gradForces[model_info.isnot_fixed]
-            timings.append((model_info.name, perf_counter()-t0, model_info.dists.shape[0]))
+            #timings.append((model_info.name, perf_counter()-t0, model_info.dists.shape[0]))
             npars_old = npars_new
             
-        print("computeGradForceClass timing:")
-        for name, dt, ndists in timings:
-            print(f"  {name}: {dt*1000:.2f}ms ({ndists} dists)")
-        print(f"  TOTAL: {sum(t for _,t,_ in timings)*1000:.2f}ms")
+        #print("computeGradForceClass timing:")
+        #for name, dt, ndists in timings:
+        #    print(f"  {name}: {dt*1000:.2f}ms ({ndists} dists)")
+        #print(f"  TOTAL: {sum(t for _,t,_ in timings)*1000:.2f}ms")
         return gradForces_tot
     
     @staticmethod
