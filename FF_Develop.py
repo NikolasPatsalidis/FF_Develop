@@ -8918,29 +8918,65 @@ class FF_Optimizer(Optimizer):
         return Uclass
     
     @staticmethod
-    def gradUclass(params,ne,models_list_info):
-        """Compute gradient of classical energy w.r.t. all parameters."""
+    def _compute_model_energy_grad(args):
+        """Helper to compute energy gradient from a single model (for parallel execution)."""
+        minf, objparams, npars_old, npars_new = args
+        model_pars = FF_Optimizer.array_model_parameters(
+            objparams, minf.fixed_params, minf.isnot_fixed
+        )
+        gu = FF_Optimizer.UperModelContribution_grad(
+            minf.u_model, minf.dists, minf.dl, minf.du,
+            model_pars, *minf.model_args
+        )
+        return (npars_old, npars_new, gu[minf.isnot_fixed])
+    
+    @staticmethod
+    def gradUclass(params, ne, models_list_info, n_workers=None):
+        """Compute gradient of classical energy w.r.t. all parameters.
+        
+        Parameters
+        ----------
+        params : np.ndarray
+            Flattened array of optimizable parameters.
+        ne : int
+            Number of data points (configurations).
+        models_list_info : list
+            List of Model_Info objects for each potential term.
+        n_workers : int, optional
+            Number of parallel workers. If None or 1, runs sequentially.
+            
+        Returns
+        -------
+        Uclass_grad : np.ndarray
+            Gradient of shape (n_params, ne).
+        """
         n_p = params.shape[0]
-        Uclass_grad = np.zeros((n_p,ne), dtype=np.float64)
+        
+        # Pre-compute param slices for each model
+        param_slices = []
         npars_old = 0
         for minf in models_list_info:
-            #t0 = perf_counter()
-            npars_new = npars_old  + minf.n_notfixed
-            
-            objparams = params[ npars_old : npars_new ]
-            model_pars = FF_Optimizer.array_model_parameters(objparams,
-                                                    minf.fixed_params,
-                                                    minf.isnot_fixed,
-                                                    )
-
-            gu = FF_Optimizer.UperModelContribution_grad( 
-                    minf.u_model,
-                    minf.dists, minf.dl, minf.du,
-                    model_pars, *minf.model_args)
-
-            Uclass_grad[npars_old: npars_new] = gu[minf.isnot_fixed]
-           
+            npars_new = npars_old + minf.n_notfixed
+            objparams = params[npars_old:npars_new]
+            param_slices.append((minf, objparams, npars_old, npars_new))
             npars_old = npars_new
+        
+        # Sequential execution if n_workers is None or 1
+        if n_workers is None or n_workers <= 1 or len(models_list_info) <= 1:
+            Uclass_grad = np.zeros((n_p, ne), dtype=np.float64)
+            for args in param_slices:
+                npars_old, npars_new, gu = FF_Optimizer._compute_model_energy_grad(args)
+                Uclass_grad[npars_old:npars_new] = gu
+            return Uclass_grad
+        
+        # Parallel execution
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            results = list(executor.map(FF_Optimizer._compute_model_energy_grad, param_slices))
+        
+        # Assemble results
+        Uclass_grad = np.zeros((n_p, ne), dtype=np.float64)
+        for npars_old, npars_new, gu in results:
+            Uclass_grad[npars_old:npars_new] = gu
         return Uclass_grad
     
     @staticmethod
