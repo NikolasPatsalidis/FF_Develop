@@ -8861,18 +8861,14 @@ class FF_Optimizer(Optimizer):
     @staticmethod
     def _compute_model_energy(args):
         """Helper to compute energy contribution from a single model (for parallel execution)."""
-        import threading
         minf, objparams = args
         model_pars = FF_Optimizer.array_model_parameters(
             objparams, minf.fixed_params, minf.isnot_fixed
         )
-        t0 = perf_counter()
         Utemp = FF_Optimizer.UperModelContribution(
             minf.u_model, minf.dists, minf.dl, minf.du,
             model_pars, *minf.model_args
         )
-        Debug: print thread info
-        print(f"  Model {minf.name}: thread={threading.current_thread().name}, time={perf_counter()-t0:.4f}s")
         return Utemp
     
     @staticmethod
