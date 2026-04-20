@@ -739,9 +739,27 @@ class ActiveLearningPipeline:
         fixed_types = self.al_config.fixed_types
         langevin = LangevinDynamics(self.setup, self.al_config, mass_map, fixed_types)
         
-        # Select initial configurations for MD
+        # Select initial configurations with Boltzmann weighting (like MC_sample)
         n_init = min(self.al_config.md_initial_configs, len(data))
-        init_data = data.sample(n=n_init).copy()
+        
+        # Compute Uclass for all configurations if not already present
+        if 'Uclass' not in data.columns:
+            ff.al_help.evaluate_potential(data, self.setup, 'opt')
+        
+        Uclass = data['Uclass'].to_numpy()
+        
+        # Boltzmann-weighted selection: p = exp(-beta * (U - Umin))
+        prop_sel = np.exp(-self.beta_sampling * (Uclass - Uclass.min()))
+        prop_sel /= prop_sel.sum()
+        
+        all_indexes = np.array(data.index)
+        try:
+            idx_chosen = np.random.choice(all_indexes, size=n_init, replace=False, p=prop_sel)
+        except ValueError:
+            # Fallback to uniform if probabilities are problematic
+            idx_chosen = np.random.choice(all_indexes, size=n_init, replace=False, p=None)
+        
+        init_data = data.loc[idx_chosen].copy()
         
         # Ensure required columns exist
         required_cols = ['coords', 'at_type', 'natoms']

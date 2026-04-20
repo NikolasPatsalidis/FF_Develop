@@ -1692,10 +1692,10 @@ class al_help():
         dataeval = Interfacial_Evaluator(data,setup,prefix='all')
         #print(data)
         #funs = ['MAE','relMAE','BIAS','STD','MSE']
-        funs = ['MAE','MSE']
+        funs = ['MAE',]
         
         cols = ['sys_name']
-        df = cols + ['MAE','MSE']
+        df = cols + ['MAE']
         if setup.costf not in funs: funs.append(setup.costf)
         
         trev = dataeval.make_evaluation_table(funs,cols,save_csv='predict.csv')
