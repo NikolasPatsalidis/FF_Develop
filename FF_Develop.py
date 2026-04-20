@@ -142,6 +142,211 @@ def _numba_add_dihedral_batch(gradForces, fg, dri, drj, drk, drl,
                 gradForces[n, k, d] += drk[m, d] * fg_n
                 gradForces[n, l, d] += drl[m, d] * fg_n
 
+
+class NumbaHelpers:
+    """Numba-compiled helper functions for potential energy calculations.
+    
+    Provides optimized implementations of u_vectorized, find_dydx, and 
+    find_derivative_gradient for each potential model type.
+    """
+    
+    # ==================== harmonic ====================
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_harmonic_u_vectorized(r, r0, k):
+        return k * (r - r0) ** 2
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_harmonic_dydx(r, r0, k):
+        return 2 * k * (r - r0)
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_harmonic_derivative_gradient(r, r0, k):
+        n = r.shape[0]
+        fg = np.empty((2, n), dtype=np.float64)
+        fg[0] = -2 * k
+        fg[1] = 2 * (r - r0)
+        return fg
+    
+    # ==================== harmonic3 ====================
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_harmonic3_u_vectorized(r, r0, k1, k2, k3):
+        r_r0 = r - r0
+        r_r0m2 = r_r0 * r_r0
+        r_r0m3 = r_r0m2 * r_r0
+        r_r0m4 = r_r0m2 * r_r0m2
+        return k1 * r_r0m2 + k2 * r_r0m3 + k3 * r_r0m4
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_harmonic3_dydx(r, r0, k1, k2, k3):
+        r_r0 = r - r0
+        r_r0m2 = r_r0 * r_r0
+        r_r0m3 = r_r0m2 * r_r0
+        return 2 * k1 * r_r0 + 3 * k2 * r_r0m2 + 4 * k3 * r_r0m3
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_harmonic3_derivative_gradient(r, r0, k1, k2, k3):
+        n = r.shape[0]
+        r_r0 = r - r0
+        r_r0m2 = r_r0 * r_r0
+        r_r0m3 = r_r0m2 * r_r0
+        fg = np.empty((4, n), dtype=np.float64)
+        fg[0] = -(2 * k1 + 6 * k2 * r_r0 + 12 * k3 * r_r0m2)
+        fg[1] = 2 * r_r0
+        fg[2] = 3 * r_r0m2
+        fg[3] = 4 * r_r0m3
+        return fg
+    
+    # ==================== LJ ====================
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_LJ_u_vectorized(r, sigma, epsilon):
+        so_r6 = (sigma / r) ** 6
+        so_r12 = so_r6 * so_r6
+        return 4 * epsilon * (so_r12 - so_r6)
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_LJ_dydx(r, sigma, epsilon):
+        so_r6 = (sigma / r) ** 6
+        so_r12 = so_r6 * so_r6
+        return 4 * epsilon * (6 * so_r6 - 12 * so_r12) / r
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_LJ_derivative_gradient(r, sigma, epsilon):
+        n = r.shape[0]
+        so_r6 = (sigma / r) ** 6
+        so_r12 = so_r6 * so_r6
+        fg = np.empty((2, n), dtype=np.float64)
+        fg[0] = 144 * epsilon * (so_r6 - 4 * so_r12) / sigma / r
+        fg[1] = 24 * (so_r6 - 2 * so_r12) / r
+        return fg
+    
+    # ==================== MorseBond ====================
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_MorseBond_u_vectorized(r, re, De, alpha):
+        t1 = -alpha * (r - re)
+        e1 = np.exp(t1)
+        me1 = 1 - e1
+        return De * me1 * me1
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_MorseBond_dydx(r, re, De, alpha):
+        t1 = -alpha * (r - re)
+        e1 = np.exp(t1)
+        return 2 * alpha * De * (1 - e1) * e1
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_MorseBond_derivative_gradient(r, re, De, alpha):
+        n = r.shape[0]
+        r_re = r - re
+        t1 = -alpha * r_re
+        e1 = np.exp(t1)
+        e2 = np.exp(2 * t1)
+        rr = e2 - e1
+        r2r = 2 * e2 - e1
+        fg = np.empty((3, n), dtype=np.float64)
+        fg[0] = -2 * alpha * alpha * De * r2r
+        fg[1] = -2 * alpha * rr
+        fg[2] = 2 * De * (alpha * r_re * r2r - rr)
+        return fg
+    
+    # ==================== Morse ====================
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Morse_u_vectorized(r, re, De, alpha):
+        t1 = -alpha * (r - re)
+        return De * (np.exp(2.0 * t1) - 2.0 * np.exp(t1))
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Morse_dydx(r, re, De, alpha):
+        t1 = -alpha * (r - re)
+        return -2 * alpha * De * (np.exp(2 * t1) - np.exp(t1))
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Morse_derivative_gradient(r, re, De, alpha):
+        n = r.shape[0]
+        r_re = r - re
+        t1 = -alpha * r_re
+        e1 = np.exp(t1)
+        e2 = np.exp(2 * t1)
+        rr = e2 - e1
+        r2r = 2 * e2 - e1
+        fg = np.empty((3, n), dtype=np.float64)
+        fg[0] = -2 * alpha * alpha * De * r2r
+        fg[1] = -2 * alpha * rr
+        fg[2] = 2 * De * (alpha * r_re * r2r - rr)
+        return fg
+    
+    # ==================== expCos ====================
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_expCos_u_vectorized(r, ke, the, lam):
+        cos_diff = np.cos(r) - np.cos(the)
+        return ke * np.exp(-lam * cos_diff * cos_diff)
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_expCos_dydx(r, ke, the, lam):
+        cos_diff = np.cos(r) - np.cos(the)
+        return ke * np.exp(-lam * cos_diff * cos_diff) * 2 * lam * np.sin(r) * cos_diff
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_expCos_derivative_gradient(r, ke, the, lam):
+        n = r.shape[0]
+        cos_diff = np.cos(r) - np.cos(the)
+        f1 = np.exp(-lam * cos_diff * cos_diff)
+        f2 = ke * f1 * 2 * lam * np.sin(r)
+        dydx = f2 * cos_diff
+        fg = np.empty((3, n), dtype=np.float64)
+        fg[0] = dydx / ke
+        fg[1] = f2 * np.sin(the) * (1 - 2 * lam * cos_diff * cos_diff)
+        fg[2] = dydx * (1 / lam - cos_diff * cos_diff)
+        return fg
+    
+    # ==================== Fourier ====================
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Fourier_u_vectorized(r, params, ua_min):
+        """Compute Fourier potential. ua_min is pre-computed minimum."""
+        n_params = params.shape[0]
+        u = np.zeros(r.shape[0], dtype=np.float64)
+        for j in range(1, n_params + 1):
+            u += params[j - 1] * (1.0 / j * np.cos(j * r))
+        return u - ua_min
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Fourier_dydx(r, params):
+        n_params = params.shape[0]
+        g = np.zeros(r.shape[0], dtype=np.float64)
+        for j in range(1, n_params + 1):
+            g += params[j - 1] * (-np.sin(j * r))
+        return g
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Fourier_derivative_gradient(r, params):
+        n_params = params.shape[0]
+        nr = r.shape[0]
+        fg = np.empty((n_params, nr), dtype=np.float64)
+        for j in range(1, n_params + 1):
+            fg[j - 1] = -np.sin(j * r)
+        return fg
+
+
 class Parsers():
     """Base class for parsing molecular structure files.
 
@@ -4454,34 +4659,17 @@ class harmonic3:
     def u_vectorized(self):
         """Compute potential energy for all distances."""
         r0, k1, k2, k3 = self.params
-        r = self.r
-        
-        r_r0 = r - r0
-        r_r0m2 = r_r0*r_r0
-        r_r0m3 = r_r0m2*r_r0
-        r_r0m4 = r_r0m2*r_r0m2
-        
-        u = k1*r_r0m2 + k2*r_r0m3 + k3*r_r0m4 
-        
-        return u
+        return NumbaHelpers._numba_harmonic3_u_vectorized(self.r, r0, k1, k2, k3)
     
     def find_dydx(self):
         """Compute derivative of potential w.r.t. distance."""
         r0, k1, k2, k3 = self.params
-        r = self.r
-        r_r0 = r - r0
-        r_r0m2 = r_r0*r_r0
-        r_r0m3 = r_r0m2*r_r0
-        
-        g = 2*k1*r_r0 + 3*k2*r_r0m2 + 4*k3*r_r0m3
-        
+        g = NumbaHelpers._numba_harmonic3_dydx(self.r, r0, k1, k2, k3)
         self.dydx = g
-        
         return g
     
     def find_gradient(self):
         """Compute gradient of potential w.r.t. parameters."""
-        
         r0, k1, k2, k3 = self.params
         r = self.r
         r_r0 = r - r0
@@ -4490,36 +4678,19 @@ class harmonic3:
         r_r0m4 = r_r0m2*r_r0m2
         
         g = np.empty((4,r.shape[0]), dtype=np.float64)
-        
-        
         g[0] = - (2*k1*r_r0 + 3*k2*r_r0m2 + 4*k3*r_r0m3)
         g[1] = r_r0m2 
         g[2] = r_r0m3 
         g[3] = r_r0m4 
         
         self.params_gradient = g
-        
         return g
     
     def find_derivative_gradient(self):
         """Compute mixed second derivative (d^2U/dr/dparam)."""
-        
         r0, k1, k2, k3 = self.params
-        r = self.r
-        r_r0 = r - r0
-        r_r0m2 = r_r0*r_r0
-        r_r0m3 = r_r0m2*r_r0
-        
-        fg = np.empty((4,r.shape[0]), dtype=np.float64)
-        
-        
-        fg[0] = - (2*k1 + 6*k2*r_r0 + 12*k3*r_r0m2)
-        fg[1] = 2*r_r0 
-        fg[2] = 3*r_r0m2 
-        fg[3] = 4*r_r0m3 
-        
+        fg = NumbaHelpers._numba_harmonic3_derivative_gradient(self.r, r0, k1, k2, k3)
         self.derivative_gradient = fg
-        
         return fg
 
 
@@ -4535,43 +4706,30 @@ class harmonic:
     def u_vectorized(self):
         """Compute potential energy for all distances."""
         r0, k = self.params
-        r = self.r
-        u = k*(r-r0)**2
-        return u
+        return NumbaHelpers._numba_harmonic_u_vectorized(self.r, r0, k)
     
     def find_dydx(self):
         """Compute derivative of potential w.r.t. distance."""
         r0, k = self.params
-        r = self.r
-        g = 2*k*(r-r0)
+        g = NumbaHelpers._numba_harmonic_dydx(self.r, r0, k)
         self.dydx = g
         return g
     
     def find_gradient(self):
         """Compute gradient of potential w.r.t. parameters."""
-        
         r0, k = self.params
         r = self.r
-        
         g = np.empty((2,r.shape[0]), dtype=np.float64)
         r_r0 = r - r0
         g[0] = -2*k*(r_r0)
         g[1] = r_r0 * r_r0
-        
         self.params_gradient = g
         return g
 
     def find_derivative_gradient(self):
         """Compute mixed second derivative (d^2U/dr/dparam)."""
-        
         r0, k = self.params
-        r = self.r
-        
-        fg = np.empty((2,r.shape[0]), dtype=np.float64)
-        r_r0 = r - r0
-        fg[0] = -2*k
-        fg[1] = 2*r_r0 
-        
+        fg = NumbaHelpers._numba_harmonic_derivative_gradient(self.r, r0, k)
         self.derivative_gradient = fg
         return fg
 
@@ -4588,25 +4746,12 @@ class LJ:
     def u_vectorized(self):
         """Compute potential energy for all distances."""
         sigma, epsilon = self.params
-        r = self.r
-        
-        so_r6 = (sigma/r)**6
-        so_r12 = so_r6*so_r6
-        
-        u = 4 * epsilon * (so_r12 - so_r6) 
-        return u
-        
+        return NumbaHelpers._numba_LJ_u_vectorized(self.r, sigma, epsilon)
     
     def find_dydx(self):
         """Compute derivative of potential w.r.t. distance."""
         sigma, epsilon = self.params
-        r = self.r
-        
-        so_r6 = (sigma/r)**6
-        so_r12 = so_r6*so_r6
-        
-        g = 4 * epsilon * ( 6*so_r6 - 12*so_r12 )/r
-        
+        g = NumbaHelpers._numba_LJ_dydx(self.r, sigma, epsilon)
         self.dydx = g
         return g
        
@@ -4614,31 +4759,18 @@ class LJ:
         """Compute gradient of potential w.r.t. parameters."""
         sigma, epsilon = self.params
         r = self.r
-        
         so_r6 = (sigma/r)**6
         so_r12 = so_r6*so_r6
-        
         g = np.zeros((2,r.shape[0]))
-        
         g[0] = 4 * epsilon * (12*so_r12  - 6*so_r6 )/sigma 
         g[1] = 4 * (so_r12 - so_r6) 
-        
         self.params_gradient = g
         return g
 
     def find_derivative_gradient(self):
         """Compute mixed second derivative (d^2U/dr/dparam)."""
         sigma, epsilon = self.params
-        r = self.r
-        
-        so_r6 = (sigma/r)**6
-        so_r12 = so_r6*so_r6
-        
-        fg = np.zeros((2,r.shape[0]))
-        
-        fg[0] = 144 * epsilon * (so_r6  - 4*so_r12 )/sigma/r 
-        fg[1] = 24 * (so_r6 -2*so_r12)/r 
-        
+        fg = NumbaHelpers._numba_LJ_derivative_gradient(self.r, sigma, epsilon)
         self.derivative_gradient = fg
         return fg
     
@@ -4650,78 +4782,41 @@ class MorseBond:
         self.r = r
         self.params = params
         return 
+    
     def u_vectorized(self):
         """Compute potential energy for all distances."""
-        x = self.params
-        r = self.r
-        
-        re = x[0]
-        De = x[1]
-        alpha = x[2]
-        t1 = -alpha*(r-re)
-        e1 = np.exp(t1)
-        me1 = 1 - e1
-        u = De*me1*me1
-        return u
-        
+        re, De, alpha = self.params
+        return NumbaHelpers._numba_MorseBond_u_vectorized(self.r, re, De, alpha)
     
     def find_dydx(self):
         """Compute derivative of potential w.r.t. distance."""
-        x = self.params
-        r = self.r
-        
-        re = x[0]
-        De = x[1]
-        alpha = x[2]
-        
-        t1 = - alpha*(r-re)
-        e1 = np.exp(t1)
-        g = 2 * alpha * De *(1-e1)*e1
+        re, De, alpha = self.params
+        g = NumbaHelpers._numba_MorseBond_dydx(self.r, re, De, alpha)
         self.dydx = g
         return g
        
     def find_gradient(self):
         """Compute gradient of potential w.r.t. parameters."""
         r = self.r
-        x = self.params
-        re, De, alpha = x
+        re, De, alpha = self.params
         nr = r.shape[0]
         n = self.params.shape[0]
-        
         g = np.zeros((n,nr))
-        
         r_re = r-re
         t1 = -alpha*r_re
         e1 = np.exp(t1)
         me1 = 1 - e1
         me1_e1 = me1*e1
-        g[0] = -2 * De * alpha * me1_e1 #dudre
-        g[1] = me1*me1 # dudDe
-        g[2] = 2 * De * r_re * me1_e1 # dudalpha
-        
+        g[0] = -2 * De * alpha * me1_e1
+        g[1] = me1*me1
+        g[2] = 2 * De * r_re * me1_e1
         self.params_gradient = g
         return g
     
     def find_derivative_gradient(self):
         """Compute mixed second derivative (d^2U/dr/dparam)."""
-        r = self.r
-        x = self.params
-        re, De, alpha = x
-        nr = r.shape[0]
-        n = self.params.shape[0]
-        
-        fg = np.zeros((n,nr))
-        
-        r_re = r-re
-        t1 = -alpha*r_re
-        e1 = np.exp(t1)
-        e2 = np.exp(2*t1)
-        rr = (e2  - e1 )
-        r2r = (2*e2-e1)
-        fg[0] = -2 *  alpha * alpha * De  * r2r  #d^2udrdre
-        fg[1] = -2 * alpha * rr # d^2udrDe
-        fg[2] = 2 * De * ( alpha*r_re*r2r - rr  ) # d^22udrdalpha
-        
+        re, De, alpha = self.params
+        fg = NumbaHelpers._numba_MorseBond_derivative_gradient(self.r, re, De, alpha)
         self.derivative_gradient = fg
         return fg
 
@@ -4732,30 +4827,22 @@ class expCos:
         self.r = r
         self.params = params
         return 
+    
     def u_vectorized(self):
         """Compute potential energy for all angles."""
-        x = self.params
-        r = self.r
-        ke,the,lam = x 
-        cos_diff = np.cos(r) - np.cos(the)
-        u = ke*np.exp( -lam * cos_diff * cos_diff )
-        
-        return u
+        ke, the, lam = self.params
+        return NumbaHelpers._numba_expCos_u_vectorized(self.r, ke, the, lam)
     
     def find_dydx(self):
         """Compute derivative of potential w.r.t. angle."""
-        x = self.params
-        r = self.r
-        ke,the,lam = x 
-        cos_diff = np.cos(r) - np.cos(the)
-        g = ke*np.exp( -lam * cos_diff * cos_diff ) * 2 *lam * np.sin(r) * cos_diff
- 
+        ke, the, lam = self.params
+        g = NumbaHelpers._numba_expCos_dydx(self.r, ke, the, lam)
         self.dydx = g
         return g
        
     def find_gradient(self):
         """Compute gradient of potential w.r.t. parameters."""
-        ke,the,lam = self.params
+        ke, the, lam = self.params
         r = self.r
         nr = r.shape[0]
         n = self.params.shape[0]
@@ -4765,24 +4852,13 @@ class expCos:
         g[0] = f1
         g[1] = ke * f1 * cos_diff * ( -2 * lam * np.sin(the) )
         g[2] = ke * f1 * cos_diff * (-cos_diff)
-        
         self.params_gradient = g
         return g
     
     def find_derivative_gradient(self):
         """Compute mixed second derivative (d^2U/dr/dparam)."""
-        ke,the,lam = self.params
-        r = self.r
-        nr = r.shape[0]
-        n = self.params.shape[0]
-        cos_diff = np.cos(r) - np.cos(the)
-        fg = np.zeros((n,nr))
-        f1 = np.exp( -lam * cos_diff * cos_diff )
-        f2 = ke * f1 * 2 *lam * np.sin(r)
-        dydx =  f2 * cos_diff
-        fg[0] = dydx/ke
-        fg[1] =  f2 * np.sin(the) * ( 1 - 2 *lam * cos_diff*cos_diff )
-        fg[2] =  dydx *(1/lam - cos_diff * cos_diff)
+        ke, the, lam = self.params
+        fg = NumbaHelpers._numba_expCos_derivative_gradient(self.r, ke, the, lam)
         self.derivative_gradient = fg
         return fg     
 
@@ -4794,40 +4870,25 @@ class Fourier:
         self.r = r
         self.params = params
         return 
+    
     def u_vectorized(self):
         """Compute potential energy for all angles, shifted so min(U) = 0."""
-        x = self.params
-        r = self.r
-        
-        n = x.shape[0]
-        u = np.zeros(r.shape)
-        for j in range(1,n+1):
-            u += x[j-1] * (j**(-1) * np.cos(j*r))
-        
-        # Shift so minimum is 0: U_shifted = U - U_min
         ua_min, _ = self.get_min()
-        
-        return u - ua_min
+        return NumbaHelpers._numba_Fourier_u_vectorized(self.r, self.params, ua_min)
 
     def get_min(self):
         x = self.params
         n = x.shape[0]
-        ra = np.arange(0, np.pi,0.01)
+        ra = np.arange(0, np.pi, 0.01)
         ua = np.zeros_like(ra)
         for j in range(1, n+1):
             ua += x[j-1] * (j**(-1) * np.cos(j*ra))
-        ra_min = ra [np.argmin(ua)]
+        ra_min = ra[np.argmin(ua)]
         return ua.min(), ra_min
     
     def find_dydx(self):
         """Compute derivative of potential w.r.t. angle."""
-        x = self.params
-        r = self.r
-        n = x.shape[0]
-        g = np.zeros(r.shape)
-        for j in range(1,n+1):
-            g += x[j-1] * ( - j*(j**(-1)) * np.sin(j*r) )
- 
+        g = NumbaHelpers._numba_Fourier_dydx(self.r, self.params)
         self.dydx = g
         return g
        
@@ -4835,25 +4896,18 @@ class Fourier:
         """Compute gradient of potential w.r.t. parameters."""
         r = self.r
         x = self.params
-        _ , ra_min = self.get_min()
+        _, ra_min = self.get_min()
         nr = r.shape[0]
         n = x.shape[0]
         g = np.zeros((n,nr))
         for j in range(1,n+1):
-            g[j-1] =  (j**(-1)) * np.cos(j*r) - (j**(-1)) * np.cos(j*ra_min)
+            g[j-1] = (j**(-1)) * np.cos(j*r) - (j**(-1)) * np.cos(j*ra_min)
         self.params_gradient = g
         return g
     
     def find_derivative_gradient(self):
         """Compute mixed second derivative (d^2U/dr/dparam)."""
-        r = self.r
-        x = self.params
-        nr = r.shape[0]
-        n = x.shape[0]
-        
-        fg = np.zeros((n,nr))
-        for j in range(1,n+1):
-            fg[j-1] = - j*(j**(-1)) * np.sin(j*r) 
+        fg = NumbaHelpers._numba_Fourier_derivative_gradient(self.r, self.params)
         self.derivative_gradient = fg
         return fg    
 
@@ -4864,73 +4918,41 @@ class Morse:
         self.r = r
         self.params = params
         return 
+    
     def u_vectorized(self):
         """Compute potential energy for all distances."""
-        x = self.params
-        r = self.r
-        
-        re = x[0]
-        De = x[1]
-        alpha = x[2]
-        t1 = -alpha*(r-re)
-        u = De*(np.exp(2.0*t1)-2.0*np.exp(t1))
-        
-        return u
+        re, De, alpha = self.params
+        return NumbaHelpers._numba_Morse_u_vectorized(self.r, re, De, alpha)
     
     def find_dydx(self):
         """Compute derivative of potential w.r.t. distance."""
-        x = self.params
-        r = self.r
-        
-        re = x[0]
-        De = x[1]
-        alpha = x[2]
-        t1 = - alpha*(r-re)
-        g = -2 * alpha* De * (np.exp(2*t1) - np.exp(t1))
+        re, De, alpha = self.params
+        g = NumbaHelpers._numba_Morse_dydx(self.r, re, De, alpha)
         self.dydx = g
         return g
        
     def find_gradient(self):
         """Compute gradient of potential w.r.t. parameters."""
         r = self.r
-        x = self.params
-        re, De, alpha = x
+        re, De, alpha = self.params
         nr = r.shape[0]
         n = self.params.shape[0]
         g = np.zeros((n,nr))
-        
         r_re = r-re
         t1 = -alpha*r_re
         e1 = np.exp(t1)
         e2 = np.exp(2*t1)
-        rr = (e2  - e1 )
-        g[0] = 2 * De * alpha * rr #dudre
-        g[1] = rr - e1 # dudDe
-        g[2] = -2 * De * r_re * rr # dudalpha
-        
+        rr = (e2 - e1)
+        g[0] = 2 * De * alpha * rr
+        g[1] = rr - e1
+        g[2] = -2 * De * r_re * rr
         self.params_gradient = g
         return g
     
     def find_derivative_gradient(self):
         """Compute mixed second derivative (d^2U/dr/dparam)."""
-        r = self.r
-        x = self.params
-        re, De, alpha = x
-        nr = r.shape[0]
-        n = self.params.shape[0]
-        
-        fg = np.zeros((n,nr))
-        
-        r_re = r-re
-        t1 = -alpha*r_re
-        e1 = np.exp(t1)
-        e2 = np.exp(2*t1)
-        rr = (e2  - e1 )
-        r2r = (2*e2-e1)
-        fg[0] = -2 *  alpha * alpha * De  * r2r  #d^2udrdre
-        fg[1] = -2 * alpha * rr # d^2udrDe
-        fg[2] = 2 * De * ( alpha*r_re*r2r - rr  ) # d^22udrdalpha
-        
+        re, De, alpha = self.params
+        fg = NumbaHelpers._numba_Morse_derivative_gradient(self.r, re, De, alpha)
         self.derivative_gradient = fg
         return fg
 
