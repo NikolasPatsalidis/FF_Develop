@@ -9129,9 +9129,10 @@ class FF_Optimizer(Optimizer):
                                         i_index, j_index, k_index, l_index)
         return
     
+    @jit(nopython=True, fastmath=True)
     def numba_add_dihedral(forces,fi, fj, fk, fl , i_indices, j_indices, k_indices, l_indices):
         """Add dihedral force contributions to atom forces."""
-        for m in prange(len(i_indices)):
+        for m in range(len(i_indices)):
             i, j, k, l = i_indices[m] , j_indices[m], k_indices[m], l_indices[m]
             forces[i] += fi[m]
             forces[j] += fj[m]
@@ -9139,20 +9140,20 @@ class FF_Optimizer(Optimizer):
             forces[l] += fl[m]
         return
     
-    @jit(nopython=True,fastmath=True)
+    @jit(nopython=True, fastmath=True)
     def numba_add_angle(forces, fa,fc, i_indices, j_indices,k_indices):
         """Add angle force contributions to atom forces."""
-        for m in prange(len(i_indices)):
+        for m in range(len(i_indices)):
             i, j, k = i_indices[m] , j_indices[m], k_indices[m]
             forces[i] += fa[m]
             forces[k] += fc[m]
             forces[j] -= (fa[m]+fc[m])
         return
     
-    @jit(nopython=True,fastmath=True)
+    @jit(nopython=True, fastmath=True)
     def numba_add_ij(forces, pairwise_forces, i_indices, j_indices):
         """Add pairwise force contributions to atom forces."""
-        for k in prange(len(i_indices)):
+        for k in range(len(i_indices)):
             i, j = i_indices[k], j_indices[k]
             forces[i] += pairwise_forces[k]
             forces[j] -= pairwise_forces[k]
