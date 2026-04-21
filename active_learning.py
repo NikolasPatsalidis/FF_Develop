@@ -456,10 +456,10 @@ class ActiveLearningPipeline:
             
             # Update input files for next iteration (from results folder)
             self.potential_file = f"{self.setup.runpath}/potential.in"
-            self.setup.run = iteration
 
             self.setup = ff.Setup_Interfacial_Optimization(self.methodology_file, self.potential_file)
             
+            self.setup.run = iteration
             # Step D: Evaluation
             self.evaluate(iteration)
             
