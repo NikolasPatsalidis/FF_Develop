@@ -520,7 +520,7 @@ def write_pw_input(at_types, positions, cell,  pseudo_map, prefix='pw', ibrav=0,
     outdir = f'{prefix}_out'
     mixing_mode='local-TF'
     ion_dynamics='bfgs'
-    disk_io='minimal'
+    disk_io='none'
 
     ve = ','if add_commas else ''
     # If cell information is provided globally, you can overwrite it
