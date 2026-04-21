@@ -422,6 +422,8 @@ class ActiveLearningPipeline:
             print(f"ITERATION {iteration}")
             print(f"{'='*60}")
             
+            self.setup.run = iteration
+
             t_iter_start = perf_counter()
             
             # Read data
@@ -454,6 +456,8 @@ class ActiveLearningPipeline:
             
             # Update input files for next iteration (from results folder)
             self.potential_file = f"{self.setup.runpath}/potential.in"
+            self.setup.run = iteration
+
             self.setup = ff.Setup_Interfacial_Optimization(self.methodology_file, self.potential_file)
             
             # Step D: Evaluation
@@ -1167,7 +1171,7 @@ eval $linecm
 
         predicted_costs = self.al.predict_model(data, self.setup)
         
-        self.al.write_errors(predicted_costs, next_iter, 'predict')
+        self.al.write_errors(predicted_costs, iteration, 'predict')
         
         print(f'Evaluation time = {perf_counter() - t0:.3e} sec')
     
