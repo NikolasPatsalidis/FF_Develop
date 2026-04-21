@@ -2680,60 +2680,76 @@ class al_help():
             `(uncertainty_norm, uncertainty)` - normalized and raw uncertainty.
         """
         t0 = perf_counter()
-        def overlap(hist,x,v, a):
-            return np.trapz( hist * np.exp(- a*(v-x)**2), x ) 
-
-        ndata = len (candidate_data)
-        uncertainty = np.zeros((ndata,) , dtype = np.float64)
-
-        descriptor_info_candidates = candidate_data[ 'descriptor_info' ]
-
-        man_ex = Data_Manager(existing_data,setup)
         
+        # Vectorized overlap: compute for multiple values at once
+        def overlap_batch(hist, x, vals, a, dx):
+            """Compute overlap for multiple values at once."""
+            # vals: (N,), x: (M,), hist: (M,)
+            # diff: (N, M) = vals[:, None] - x[None, :]
+            diff = vals[:, None] - x[None, :]
+            gauss = np.exp(-a * diff**2)
+            # Trapezoidal integration: sum(hist * gauss) * dx
+            return np.sum(hist[None, :] * gauss, axis=1) * dx
+
+        ndata = len(candidate_data)
+        uncertainty = np.zeros((ndata,), dtype=np.float64)
+        descriptor_info_candidates = candidate_data['descriptor_info'].to_numpy()
+
+        man_ex = Data_Manager(existing_data, setup)
+        
+        # Pre-compute histograms
         histograms = dict()
         for model in setup.opt_models.values():
             ty = model.type
-            if np.array( [t in fixed_types for t in ty] ).all():
+            if all(t in fixed_types for t in ty):
                 continue
             fe = model.feature
             dd = man_ex.get_distribution(ty, fe)
-
-            hist, bin_edges =  np.histogram (dd , density= True, bins=200)
-            bin_centers = bin_edges[:-1] + 0.5 * ( bin_edges[1] - bin_edges[0] )
-            histograms[(ty,fe)] = (hist, bin_centers, bin_edges[-1] - bin_edges[0] )
+            hist, bin_edges = np.histogram(dd, density=True, bins=200)
+            bin_centers = bin_edges[:-1] + 0.5 * (bin_edges[1] - bin_edges[0])
+            histograms[(ty, fe)] = (hist, bin_centers, bin_edges[-1] - bin_edges[0])
         
         p = 3
-        unce_vals = [ [] for _ in range(ndata) ]
+        unce_vals = [[] for _ in range(ndata)]
 
-        for (ty, fe),(hist, x, ran) in histograms.items():
+        for (ty, fe), (hist, x, ran) in histograms.items():
+            scale = ran / 2.0
+            dx = x[1] - x[0]
             
-             
-            scale = ran/2.0
-            dr = ran/20000
+            # Compute min/max overlap with fewer points (500 vs 20000)
+            r = np.linspace(x[0], x[-1], 500)
+            ov = overlap_batch(hist, x, r, scale, dx)
+            max_overlap, min_overlap = ov.max(), ov.min()
+            denom = max(max_overlap - min_overlap, 1e-12)
             
-            r = np.arange(x[0], x[-1], dr)
-            ov = np.array([ overlap(hist,x,v, scale) for v in r])
-            max_overlap = ov.max()
-            min_overlap = ov.min()
-            
+            # Collect all values for this (ty, fe) from all candidates
+            all_vals = []
+            val_indices = []
             for j, dinfo in enumerate(descriptor_info_candidates):
                 try:
                     vals = dinfo[fe][ty]['values']
+                    all_vals.extend(vals)
+                    val_indices.extend([j] * len(vals))
                 except KeyError:
                     continue
-                unc = 0
-                for v in vals:
-                    ovr = overlap( hist, x, v , scale )
-                    unc =  1.0 - ( ovr - min_overlap) / (max_overlap - min_overlap)
-                    unce_vals[j].append( unc )
             
+            if all_vals:
+                # Single batch overlap for all values
+                overlaps = overlap_batch(hist, x, np.array(all_vals), scale, dx)
+                uncertainties = 1.0 - (overlaps - min_overlap) / denom
+                for idx, j in enumerate(val_indices):
+                    unce_vals[j].append(uncertainties[idx])
+        
+        # Final p-norm mean
         for j in range(ndata):
-            unc = np.array(unce_vals[j])
-            uncertainty[j] = np.mean(unc**p )**(1/p)
+            if unce_vals[j]:
+                unc = np.array(unce_vals[j])
+                uncertainty[j] = np.mean(unc**p)**(1/p)
         
         uncertainty = np.nan_to_num(uncertainty, 1e-8)
-        uncertainty_norm = (uncertainty - uncertainty.min() ) / ( uncertainty.max() - uncertainty.min())
-        print(' Uncertainty quantification took {:.3e} sec'.format(perf_counter() - t0 ))
+        unc_range = uncertainty.max() - uncertainty.min()
+        uncertainty_norm = (uncertainty - uncertainty.min()) / max(unc_range, 1e-12)
+        print(' Uncertainty quantification took {:.3e} sec'.format(perf_counter() - t0))
         return uncertainty_norm, uncertainty
 
 
