@@ -1125,34 +1125,54 @@ class al_help():
         
         candidate_data = pd.DataFrame()
         
+        # Check init config selection method
+        init_method = getattr(al_config, 'init_config_method', 'boltzmann')
+        
         for sysname in systems:
             
             # get all the data for this system
-
-            sys_data = init_data [ init_data['sys_name'] == sysname]
+            sys_data = init_data[init_data['sys_name'] == sysname]
             
             # get a copy of all the system data 
             step_data = copy.deepcopy(sys_data)
             
             # evaluate the potential
-            al_help.evaluate_potential(step_data, setup,'opt')
-            Uclass = step_data['Uclass'].to_numpy().copy()
+            al_help.evaluate_potential(step_data, setup, 'opt')
+            al_help.make_interactions(step_data, setup)
             
-            # select based on propability initial configurations to initiate the MC moves
-            prop_sel = np.exp( - (Uclass - Uclass.min())*beta_sampling )
-            prop_sel /= prop_sel.sum()
-
+            # select initial configurations based on method
             all_indexes = np.array(step_data.index)
+            n_select = min(len(step_data), mc_initial_configs)
+            
+            ndata = len(step_data)
+            if init_method == 'ood':
+                # OOD-based selection: use histogram uncertainty
+                prop_sel, _ = al_help.find_histogram_uncertainty(step_data, step_data, setup, fixed_types)
+                prop_sel = np.nan_to_num(prop_sel, nan=0.0)
+                if prop_sel.sum() > 0:
+                    prop_sel /= prop_sel.sum()
+                else:
+                    prop_sel = None
+            elif init_method == 'boltzmann':
+                # Boltzmann-weighted selection
+                Uclass = step_data['Uclass'].to_numpy().copy()
+                prop_sel = np.exp(-(Uclass - Uclass.min()) * beta_sampling)
+                prop_sel /= prop_sel.sum()
+            else:
+                # Random selection (uniform probability)
+                prop_sel = np.ones(ndata) / ndata
+
             try:
-                idx_chosen = np.random.choice(all_indexes, size= min(len(step_data) , mc_initial_configs) , replace=False, p = prop_sel)
+                idx_chosen = np.random.choice(all_indexes, size=n_select, replace=False, p=prop_sel)
             except ValueError:
-                idx_chosen = np.random.choice(all_indexes, size= min(len(step_data) , mc_initial_configs) , replace=False, p = None)
+                print('Warning: selecting init configs randomly in MC sampling')
+                idx_chosen = np.random.choice(all_indexes, size=n_select, replace=False, p=None)
             
             # select a subset of initial data (mc_initial_configs)
             step_data = step_data.loc[idx_chosen]
             
-            # evaluate previouss step
-            al_help.evaluate_potential(step_data, setup,'opt')
+            # evaluate previous step
+            al_help.evaluate_potential(step_data, setup, 'opt')
             Uclass_prev = step_data['Uclass'].to_numpy().copy()
             
             n = len(step_data)
