@@ -434,6 +434,102 @@ class NumbaHelpers:
             inv_j = 1.0 / j
             g[j - 1] = inv_j * np.cos(j * r) - inv_j * np.cos(j * ra_min)
         return g
+    
+    # ==================== Bezier ====================
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Bezier_taus_power(taus, n):
+        """Precompute powers of tau: taus_power[j] = taus^j."""
+        nt = taus.shape[0]
+        taus_power = np.ones((n, nt), dtype=np.float64)
+        taus_power[1] = taus
+        for j in range(2, n):
+            taus_power[j] = taus_power[j-1] * taus
+        return taus_power
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Bezier_u_vectorized(taus, y, M):
+        """Compute Bezier potential energy."""
+        ny = y.shape[0]
+        nt = taus.shape[0]
+        
+        # Compute coefficients: coeff[j] = sum_i(y[i] * M[i,j]) for i <= j
+        coeff_y_tj = np.zeros(ny, dtype=np.float64)
+        for i in range(ny):
+            ry = y[i]
+            for j in range(i, ny):
+                coeff_y_tj[j] += ry * M[i, j]
+        
+        # Evaluate polynomial: yr = sum_j(coeff[j] * taus^j)
+        yr = np.zeros(nt, dtype=np.float64)
+        taus_power = np.ones(nt, dtype=np.float64)
+        for j in range(ny):
+            yr += coeff_y_tj[j] * taus_power
+            taus_power *= taus
+        return yr
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Bezier_dydx(taus, y, M, L, taus_power):
+        """Compute Bezier derivative w.r.t. x."""
+        n = y.shape[0]
+        nt = taus.shape[0]
+        
+        # Compute coefficients with j multiplier
+        coeff_tj = np.zeros(n, dtype=np.float64)
+        for i in range(n):
+            ry = y[i]
+            for j in range(i, n):
+                coeff_tj[j] += ry * M[i, j] * j
+        
+        # dydt = sum_{j=1}^{n-1} coeff[j] * taus^{j-1}
+        dydt = np.zeros(nt, dtype=np.float64)
+        for j in range(1, n):
+            dydt += coeff_tj[j] * taus_power[j-1]
+        
+        # dydx = dydt / L
+        dydx = dydt / L
+        return dydx, dydt
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Bezier_d2ydt2(taus, y, M, taus_power):
+        """Compute second derivative d^2y/dt^2."""
+        n = y.shape[0]
+        nt = taus.shape[0]
+        
+        coeff_tj = np.zeros(n, dtype=np.float64)
+        for i in range(n):
+            ry = y[i]
+            for j in range(i, n):
+                coeff_tj[j] += ry * M[i, j] * j * (j - 1)
+        
+        d2ydt2 = np.zeros(nt, dtype=np.float64)
+        for j in range(2, n):
+            d2ydt2 += coeff_tj[j] * taus_power[j-2]
+        
+        return d2ydt2
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_BezierPeriodic_dydx(taus, y, M, L, taus_power, sign_x):
+        """Compute BezierPeriodic derivative w.r.t. x (symmetric potential)."""
+        n = y.shape[0]
+        nt = taus.shape[0]
+        
+        coeff_tj = np.zeros(n, dtype=np.float64)
+        for i in range(n):
+            ry = y[i]
+            for j in range(i, n):
+                coeff_tj[j] += ry * M[i, j] * j
+        
+        dydt = np.zeros(nt, dtype=np.float64)
+        for j in range(1, n):
+            dydt += coeff_tj[j] * taus_power[j-1]
+        
+        dydx = dydt / L * sign_x
+        return dydx, dydt
 
 
 class Parsers():
@@ -5057,52 +5153,19 @@ class BezierPeriodic(MathAssist):
         
     def u_vectorized(self):
         """Compute potential energy for all angles."""
-        # 1  find taus using newton raphson from x positions(rhos)
-        ny = self.npoints
-        y = self.ycontrol
-        M = self.M
-        taus = self.taus
-        
-        coeff_y_tj = np.zeros((ny,))
-        for i in range(ny):
-            ry = y[i]
-            for j in range(i,ny):
-                mij = M[i,j]
-                coeff_y_tj[j] += ry * mij
-        yr = np.zeros((taus.size,))  # Initialize yr with the same shape as taus
-        taus_power = np.ones((taus.size,))
-    
-        for j in range(ny):
-            yr += coeff_y_tj[j] * taus_power
-            taus_power *= taus  
+        yr = NumbaHelpers._numba_Bezier_u_vectorized(self.taus, self.ycontrol, self.M)
         self.ycurve = yr
         return yr
     
-    
     def find_dydx(self):
         """Compute derivative of potential w.r.t. angle."""
-        y = self.ycontrol
-        M = self.M
-        n = self.npoints
-        if not hasattr(self,'taus_power'):
+        if not hasattr(self, 'taus_power'):
             self.find_taus_power()
-        
-        taus_power = self.taus_power
-        coeff_tj = np.zeros((n,))
-        
-        for i in range(n):
-            ry = y[i]
-            for j in range(i,n):
-                mij = M[i,j]
-                coeff_tj[j] += ry * mij * j
-        
-        
-        g0_1 = np.dot(taus_power[0:-1].T,coeff_tj[1:])   
-        
-        self.dydt = g0_1
-        # For symmetric potential: tau = |x|/L, so dtau/dx = sign(x)/L
-        self.dydx = g0_1/self.L * np.sign(self.xvals)
-        
+        sign_x = np.sign(self.xvals)
+        dydx, dydt = NumbaHelpers._numba_BezierPeriodic_dydx(
+            self.taus, self.ycontrol, self.M, self.L, self.taus_power, sign_x)
+        self.dydt = dydt
+        self.dydx = dydx
         return self.dydx
     
     def find_gradient(self):
@@ -5132,48 +5195,28 @@ class BezierPeriodic(MathAssist):
     
     def find_derivative_gradient(self):
         """Compute mixed second derivative (d^2U/dr/dparam)."""
-        
-        taus = self.taus
-        M = self.M
-        y = self.ycontrol
-        n = self.npoints
-        
-        if not hasattr(self,'dC'):
+        if not hasattr(self, 'dC'):
             dC = self.find_dC_vectorized()
         else:
-            dC = self.dC 
-        if not hasattr(self,'dydt'):
-           _ = self.find_dydx()
+            dC = self.dC
+        if not hasattr(self, 'dydt'):
+            _ = self.find_dydx()
         
-        taus_power = self.taus_power
-        coeff_tj = np.zeros((n,))
+        # Use numba for d2ydt2 computation
+        d2ydt2 = NumbaHelpers._numba_Bezier_d2ydt2(self.taus, self.ycontrol, self.M, self.taus_power)
+        self.d2ydt2 = d2ydt2
         
-        for i in range(n):
-            ry = y[i]
-            for j in range(i,n):
-                mij = M[i,j]
-                coeff_tj[j] += ry * mij * j * (j-1)
-        
-        g0_1 = np.dot(taus_power[0:-2].T,coeff_tj[2:])   
-        
-        self.d2ydt2 = g0_1
-        
-        
-        nt = taus.shape[0]
-        fg = np.zeros((self.params.shape[0],nt))
+        nt = self.taus.shape[0]
+        fg = np.zeros((self.params.shape[0], nt))
         L = self.L
-        
-        # For symmetric potential: tau = |x|/L, so dtau/dx = sign(x)/L
         sign_x = np.sign(self.xvals)
         
-        fg[0] = (dC[0] + dC[-1]  + dC[1] + dC[2] + dC[-2] + dC[-3])/L * sign_x
-        
-        fg[1] = (dC[1] - dC[-2])/L * sign_x
-        fg[2] = (dC[2] - dC[-3])/L * sign_x
-        fg[3:] = dC[3:-3]/L * sign_x
+        fg[0] = (dC[0] + dC[-1] + dC[1] + dC[2] + dC[-2] + dC[-3]) / L * sign_x
+        fg[1] = (dC[1] - dC[-2]) / L * sign_x
+        fg[2] = (dC[2] - dC[-3]) / L * sign_x
+        fg[3:] = dC[3:-3] / L * sign_x
         
         self.params_gradient = fg
-        
         return fg
     
     def find_dydyc_numerically(self,epsilon=1e-3):
@@ -5193,16 +5236,7 @@ class BezierPeriodic(MathAssist):
     
     def find_taus_power(self):
         """Precompute powers of tau for efficient evaluation."""
-        n = self.npoints
-        taus = self.taus
-         
-        nt = taus.shape[0]
-        taus_power = np.ones((n,nt))
-         
-        taus_power[1] = taus.copy()
-        for j in range(2,n):
-            taus_power[j] = taus_power[j-1]*taus
-        self.taus_power = taus_power
+        self.taus_power = NumbaHelpers._numba_Bezier_taus_power(self.taus, self.npoints)
         return
 
     def find_dydyc_vectorized(self):
@@ -5352,51 +5386,17 @@ class Bezier(MathAssist):
     
     def u_vectorized(self):
         """Compute potential energy (vectorized implementation)."""
-        # 1  find taus using newton raphson from x positions(rhos)
-        ny = self.npoints
-        y = self.ycontrol
-        M = self.M
-        taus = self.taus
-        
-        coeff_y_tj = np.zeros((ny,))
-        for i in range(ny):
-            ry = y[i]
-            for j in range(i,ny):
-                mij = M[i,j]
-                coeff_y_tj[j] += ry * mij
-        yr = np.zeros((taus.size,))  # Initialize yr with the same shape as taus
-        taus_power = np.ones((taus.size,))
-    
-        for j in range(ny):
-            yr += coeff_y_tj[j] * taus_power
-            taus_power *= taus  
+        yr = NumbaHelpers._numba_Bezier_u_vectorized(self.taus, self.ycontrol, self.M)
         self.ycurve = yr
         return yr
     
-    
     def find_dydx(self):
         """Compute derivative of potential w.r.t. distance."""
-        y = self.ycontrol
-        M = self.M
-        n = self.npoints
-        if not hasattr(self,'taus_power'):
+        if not hasattr(self, 'taus_power'):
             self.find_taus_power()
-        
-        taus_power = self.taus_power
-        coeff_tj = np.zeros((n,))
-        
-        for i in range(n):
-            ry = y[i]
-            for j in range(i,n):
-                mij = M[i,j]
-                coeff_tj[j] += ry * mij * j
-        
-        
-        g0_1 = np.dot(taus_power[0:-1].T,coeff_tj[1:])   
-        
-        self.dydt = g0_1
-        self.dydx = g0_1/self.L # dydt*dtdx
-        
+        dydx, dydt = NumbaHelpers._numba_Bezier_dydx(self.taus, self.ycontrol, self.M, self.L, self.taus_power)
+        self.dydt = dydt
+        self.dydx = dydx
         return self.dydx
     
     def find_gradient(self):
@@ -5426,46 +5426,27 @@ class Bezier(MathAssist):
     
     def find_derivative_gradient(self):
         """Compute mixed second derivative (d^2U/dr/dparam)."""
-        
-        taus = self.taus
-        M = self.M
-        y = self.ycontrol
-        n = self.npoints
-        
-        if not hasattr(self,'dC'):
+        if not hasattr(self, 'dC'):
             dC = self.find_dC_vectorized()
         else:
-            dC = self.dC 
-        if not hasattr(self,'dydt'):
-           _ = self.find_dydx()
+            dC = self.dC
+        if not hasattr(self, 'dydt'):
+            _ = self.find_dydx()
         
-        taus_power = self.taus_power
-        coeff_tj = np.zeros((n,))
+        # Use numba for d2ydt2 computation
+        d2ydt2 = NumbaHelpers._numba_Bezier_d2ydt2(self.taus, self.ycontrol, self.M, self.taus_power)
+        self.d2ydt2 = d2ydt2
         
-        for i in range(n):
-            ry = y[i]
-            for j in range(i,n):
-                mij = M[i,j]
-                coeff_tj[j] += ry * mij * j * (j-1)
-        
-        g0_1 = np.dot(taus_power[0:-2].T,coeff_tj[2:])   
-        
-        self.d2ydt2 = g0_1
-        
-        
-        nt = taus.shape[0]
-        fg = np.zeros((self.params.shape[0],nt))
+        nt = self.taus.shape[0]
+        fg = np.zeros((self.params.shape[0], nt))
         L = self.L
         
-        fg[0] = ( -1/(L*L) )*(self.dydt + self.taus*g0_1) # dydt*dtdL
-        
-        fg[1] = (dC[0] + dC[1] + dC[2])/L
-        fg[-1] = (dC[-1] + dC[-2] + dC[-3])/L
-        
-        fg[2:-1] = dC[3:-3]/L
+        fg[0] = (-1/(L*L)) * (self.dydt + self.taus * d2ydt2)
+        fg[1] = (dC[0] + dC[1] + dC[2]) / L
+        fg[-1] = (dC[-1] + dC[-2] + dC[-3]) / L
+        fg[2:-1] = dC[3:-3] / L
         
         self.params_gradient = fg
-        
         return fg
     
     def find_dydyc_numerically(self,epsilon=1e-3):
@@ -5485,16 +5466,7 @@ class Bezier(MathAssist):
     
     def find_taus_power(self):
         """Precompute powers of tau for efficient evaluation."""
-        n = self.npoints
-        taus = self.taus
-         
-        nt = taus.shape[0]
-        taus_power = np.ones((n,nt))
-         
-        taus_power[1] = taus.copy()
-        for j in range(2,n):
-            taus_power[j] = taus_power[j-1]*taus
-        self.taus_power = taus_power
+        self.taus_power = NumbaHelpers._numba_Bezier_taus_power(self.taus, self.npoints)
         return
 
     def find_dydyc_vectorized(self):
