@@ -311,10 +311,10 @@ def main():
     rho_rc = float(settings.get('rho_rc', 5.0))
     representation = settings.get('representation', 'AA').strip()
     
-    # ========== 2. Read QE input files from data_al/L0/ ==========
+    # ========== 2. Read QE output files from data_al/L0/ ==========
     l0_dir = 'data_al/L0'
-    print(f"\nReading QE input files from {l0_dir}...")
-    data = read_all_qe_inputs_from_dir(l0_dir)
+    print(f"\nReading QE output files from {l0_dir}...")
+    data = read_all_qe_outputs_from_dir(l0_dir)
     
     if len(data) == 0:
         print(f"Error: No data loaded from {l0_dir}")
