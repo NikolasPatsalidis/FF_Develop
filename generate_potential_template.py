@@ -285,7 +285,7 @@ def write_potential_in(output_path, bond_types, angle_types, dihedral_types, pw_
             f.write('FUNC Fourier\n')
             # Fourier coefficients k1-k6, start near zero
             for i in range(1, 7):
-                f.write(f'k{i}         : 0.0000000  1  -15.00000  15.00000    1.00000 \n')
+                f.write(f'k{i}         : { np.random.uniform(-0.2, 0.2 ) :4.3f}  1  -15.00000  15.00000    1.00000 \n')
             f.write('/\n\n')
     
     print(f"Written potential.in to {output_path}")
