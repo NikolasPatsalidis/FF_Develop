@@ -8,6 +8,7 @@
 !active_learning.py
 !qe_io.py
 !plot_al_convergence.py
+!generate_potential_template.py
 
 # Keep tests
 !Tools
