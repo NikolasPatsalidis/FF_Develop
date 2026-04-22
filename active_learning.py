@@ -932,8 +932,10 @@ class ActiveLearningPipeline:
 #SBATCH --partition={sched.partition}
 #SBATCH --time={sched.time_limit}
 #SBATCH --mem={sched.memory}
-
 """
+        if sched.account:
+            script += f"#SBATCH --account={sched.account}\n"
+        script += "\n"
         # Add module loads
         if sched.modules:
             for mod in sched.modules.split(','):

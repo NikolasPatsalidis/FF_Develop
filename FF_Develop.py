@@ -530,6 +530,78 @@ class NumbaHelpers:
         
         dydx = dydt / L * sign_x
         return dydx, dydt
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Bezier_u_and_dydx(taus, y, M, L):
+        """Fused: compute u, dydx, dydt, and taus_power in one pass."""
+        n = y.shape[0]
+        nt = taus.shape[0]
+        
+        # Compute taus_power inline
+        taus_power = np.ones((n, nt), dtype=np.float64)
+        taus_power[1] = taus
+        for j in range(2, n):
+            taus_power[j] = taus_power[j-1] * taus
+        
+        # Compute coefficients for u and dydt together
+        coeff_u = np.zeros(n, dtype=np.float64)
+        coeff_d = np.zeros(n, dtype=np.float64)
+        for i in range(n):
+            ry = y[i]
+            for j in range(i, n):
+                mij = M[i, j]
+                coeff_u[j] += ry * mij
+                coeff_d[j] += ry * mij * j
+        
+        # Evaluate u = sum(coeff_u[j] * taus^j)
+        yr = np.zeros(nt, dtype=np.float64)
+        for j in range(n):
+            yr += coeff_u[j] * taus_power[j]
+        
+        # Evaluate dydt = sum(coeff_d[j] * taus^{j-1}) for j >= 1
+        dydt = np.zeros(nt, dtype=np.float64)
+        for j in range(1, n):
+            dydt += coeff_d[j] * taus_power[j-1]
+        
+        dydx = dydt / L
+        return yr, dydx, dydt, taus_power
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_BezierPeriodic_u_and_dydx(taus, y, M, L, sign_x):
+        """Fused: compute u, dydx, dydt, and taus_power for BezierPeriodic."""
+        n = y.shape[0]
+        nt = taus.shape[0]
+        
+        # Compute taus_power inline
+        taus_power = np.ones((n, nt), dtype=np.float64)
+        taus_power[1] = taus
+        for j in range(2, n):
+            taus_power[j] = taus_power[j-1] * taus
+        
+        # Compute coefficients for u and dydt together
+        coeff_u = np.zeros(n, dtype=np.float64)
+        coeff_d = np.zeros(n, dtype=np.float64)
+        for i in range(n):
+            ry = y[i]
+            for j in range(i, n):
+                mij = M[i, j]
+                coeff_u[j] += ry * mij
+                coeff_d[j] += ry * mij * j
+        
+        # Evaluate u
+        yr = np.zeros(nt, dtype=np.float64)
+        for j in range(n):
+            yr += coeff_u[j] * taus_power[j]
+        
+        # Evaluate dydt
+        dydt = np.zeros(nt, dtype=np.float64)
+        for j in range(1, n):
+            dydt += coeff_d[j] * taus_power[j-1]
+        
+        dydx = dydt / L * sign_x
+        return yr, dydx, dydt, taus_power
 
 
 class Parsers():
@@ -5193,6 +5265,17 @@ class BezierPeriodic(MathAssist):
         self.ycurve = yr
         return yr
     
+    def u_and_dydx(self):
+        """Compute potential and derivative in one fused pass (faster)."""
+        sign_x = np.sign(self.xvals)
+        yr, dydx, dydt, taus_power = NumbaHelpers._numba_BezierPeriodic_u_and_dydx(
+            self.taus, self.ycontrol, self.M, self.L, sign_x)
+        self.ycurve = yr
+        self.dydx = dydx
+        self.dydt = dydt
+        self.taus_power = taus_power
+        return yr, dydx
+    
     def find_dydx(self):
         """Compute derivative of potential w.r.t. angle."""
         if not hasattr(self, 'taus_power'):
@@ -5425,6 +5508,16 @@ class Bezier(MathAssist):
         yr = NumbaHelpers._numba_Bezier_u_vectorized(self.taus, self.ycontrol, self.M)
         self.ycurve = yr
         return yr
+    
+    def u_and_dydx(self):
+        """Compute potential and derivative in one fused pass (faster)."""
+        yr, dydx, dydt, taus_power = NumbaHelpers._numba_Bezier_u_and_dydx(
+            self.taus, self.ycontrol, self.M, self.L)
+        self.ycurve = yr
+        self.dydx = dydx
+        self.dydt = dydt
+        self.taus_power = taus_power
+        return yr, dydx
     
     def find_dydx(self):
         """Compute derivative of potential w.r.t. distance."""
