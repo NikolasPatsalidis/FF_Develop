@@ -4,7 +4,7 @@ Generate a template potential.in file from training.in and L0 configs.
 
 This script:
 1. Reads training.in to get distance_map and other settings
-2. Reads all configs from data_al/L0/
+2. Reads all QE input files from data_al/L0/ subdirectories
 3. Detects all interaction types (bonds, angles, dihedrals, special_types)
 4. Creates a template potential.in with:
    - MorseBond for bonds
@@ -16,6 +16,7 @@ This script:
 
 import os
 import sys
+import re
 import numpy as np
 import pandas as pd
 from collections import defaultdict
@@ -31,6 +32,7 @@ from FF_Develop import (
     Interactions,
     al_help
 )
+import qe_io
 
 
 def read_training_in(filepath='training.in'):
@@ -58,26 +60,150 @@ def parse_distance_map(distance_map_str):
         return {}
 
 
-def read_all_xyz_from_dir(directory):
-    """Read all .xyz files from a directory into a single DataFrame."""
+def parse_qe_input(filepath):
+    """
+    Parse a QE input file (.in) to extract atomic types, positions, and cell.
+    
+    Returns
+    -------
+    dict with keys: 'at_type', 'coords', 'lattice', 'sys_name'
+    """
+    with open(filepath, 'r') as f:
+        lines = [line.strip() for line in f.readlines()]
+    
+    at_types = []
+    coords = []
+    cell = []
+    
+    reading_cell = False
+    reading_positions = False
+    reading_species = False
+    
+    for i, line in enumerate(lines):
+        # Skip empty lines and comments
+        if not line or line.startswith('!'):
+            reading_cell = False
+            reading_positions = False
+            reading_species = False
+            continue
+        
+        # Detect CELL_PARAMETERS block
+        if 'CELL_PARAMETERS' in line.upper():
+            reading_cell = True
+            reading_positions = False
+            reading_species = False
+            continue
+        
+        # Detect ATOMIC_POSITIONS block
+        if 'ATOMIC_POSITIONS' in line.upper():
+            reading_positions = True
+            reading_cell = False
+            reading_species = False
+            continue
+        
+        # Detect ATOMIC_SPECIES block
+        if 'ATOMIC_SPECIES' in line.upper():
+            reading_species = True
+            reading_cell = False
+            reading_positions = False
+            continue
+        
+        # Detect end of blocks (new section starts with & or keyword)
+        if line.startswith('&') or line.startswith('/') or 'K_POINTS' in line.upper():
+            reading_cell = False
+            reading_positions = False
+            reading_species = False
+            continue
+        
+        # Parse CELL_PARAMETERS
+        if reading_cell:
+            parts = line.split()
+            if len(parts) >= 3:
+                try:
+                    vec = [float(parts[0]), float(parts[1]), float(parts[2])]
+                    cell.append(vec)
+                except ValueError:
+                    reading_cell = False
+        
+        # Parse ATOMIC_POSITIONS
+        if reading_positions:
+            parts = line.split()
+            if len(parts) >= 4:
+                try:
+                    at_types.append(parts[0])
+                    coords.append([float(parts[1]), float(parts[2]), float(parts[3])])
+                except ValueError:
+                    pass
+    
+    if len(cell) != 3:
+        cell = None
+    else:
+        cell = np.array(cell)
+    
+    return {
+        'at_type': at_types,
+        'coords': np.array(coords) if coords else np.array([]),
+        'lattice': cell,
+        'sys_name': os.path.basename(os.path.dirname(filepath))
+    }
+
+
+def read_all_qe_inputs_from_dir(directory):
+    """
+    Read all QE input files from data_al/L0/ subdirectories.
+    
+    Looks for .in files in each subdirectory of the given directory.
+    """
     all_data = []
     
     if not os.path.exists(directory):
         print(f"Warning: Directory {directory} does not exist")
         return pd.DataFrame()
     
+    # Look for subdirectories containing .in files
+    for item in os.listdir(directory):
+        subdir = os.path.join(directory, item)
+        if os.path.isdir(subdir):
+            # Look for .in files in this subdirectory
+            for fname in os.listdir(subdir):
+                if fname.endswith('.in'):
+                    fpath = os.path.join(subdir, fname)
+                    try:
+                        data = parse_qe_input(fpath)
+                        if len(data['at_type']) > 0:
+                            df = pd.DataFrame({
+                                'at_type': [data['at_type']],
+                                'coords': [data['coords']],
+                                'lattice': [data['lattice']],
+                                'sys_name': [data['sys_name']],
+                                'natoms': [len(data['at_type'])]
+                            })
+                            all_data.append(df)
+                            print(f"  Read {fpath}: {len(data['at_type'])} atoms")
+                    except Exception as e:
+                        print(f"Warning: Could not read {fpath}: {e}")
+    
+    # Also check for .in files directly in the directory
     for fname in os.listdir(directory):
-        if fname.endswith('.xyz'):
+        if fname.endswith('.in'):
             fpath = os.path.join(directory, fname)
             try:
-                df = Data_Manager.read_xyz(fpath)
-                df['sys_name'] = fname.replace('.xyz', '')
-                all_data.append(df)
+                data = parse_qe_input(fpath)
+                if len(data['at_type']) > 0:
+                    df = pd.DataFrame({
+                        'at_type': [data['at_type']],
+                        'coords': [data['coords']],
+                        'lattice': [data['lattice']],
+                        'sys_name': [fname.replace('.in', '')],
+                        'natoms': [len(data['at_type'])]
+                    })
+                    all_data.append(df)
+                    print(f"  Read {fpath}: {len(data['at_type'])} atoms")
             except Exception as e:
                 print(f"Warning: Could not read {fpath}: {e}")
     
     if not all_data:
-        print(f"Warning: No .xyz files found in {directory}")
+        print(f"Warning: No QE input files found in {directory}")
         return pd.DataFrame()
     
     return pd.concat(all_data, ignore_index=True)
@@ -230,10 +356,10 @@ def main():
     rho_rc = float(settings.get('rho_rc', 5.0))
     representation = settings.get('representation', 'AA').strip()
     
-    # ========== 2. Read configs from data_al/L0/ ==========
+    # ========== 2. Read QE input files from data_al/L0/ ==========
     l0_dir = 'data_al/L0'
-    print(f"\nReading configs from {l0_dir}...")
-    data = read_all_xyz_from_dir(l0_dir)
+    print(f"\nReading QE input files from {l0_dir}...")
+    data = read_all_qe_inputs_from_dir(l0_dir)
     
     if len(data) == 0:
         print(f"Error: No data loaded from {l0_dir}")
