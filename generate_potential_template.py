@@ -167,19 +167,19 @@ def read_all_qe_outputs_from_dir(directory):
 def estimate_bond_params(bond_distances):
     """Estimate MorseBond parameters from observed distances."""
     if len(bond_distances) == 0:
-        return {'D': 100.0, 'alpha': 2.0, 'r0': 1.5}
+        return { 're': 1.5 , 'De': 100.0, 'alpha': 2.0}
     
-    r0 = np.mean(bond_distances)
+    re = np.mean(bond_distances)
     r_std = np.std(bond_distances) if len(bond_distances) > 1 else 0.05
     
-    # Morse: U = D * (1 - exp(-alpha*(r-r0)))^2
+    # Morse: U = D * (1 - exp(-alpha*(r-re)))^2
     # D ~ bond dissociation energy (kcal/mol), typically 80-150 for organic
     # alpha ~ 2.0 for typical bonds
     D = 100.0
     alpha = 2.0 if r_std < 0.01 else 1.5 / max(r_std, 0.01)
     alpha = np.clip(alpha, 1.0, 3.0)
     
-    return {'D': D, 'alpha': alpha, 'r0': r0}
+    return { 're': re, 'De': D, 'alpha': alpha}
 
 
 def estimate_angle_params(angle_values):
@@ -236,14 +236,14 @@ def write_potential_in(output_path, bond_types, angle_types, dihedral_types, pw_
             
             f.write(f'&BO0 {type_str}\n')
             f.write('FUNC MorseBond\n')
+            # re: equilibrium distance
+            re_low = max(0.8, params["re"] - 0.2)
+            re_high = params["re"] + 0.2
+            f.write(f're         : {params["re"]:.7f}  1  {re_low:.5f}  {re_high:.5f}    1.00000 \n')
             # D: dissociation energy
-            f.write(f'D          : {params["D"]:.7f}  1  10.00000  200.00000    1.00000 \n')
+            f.write(f'De         : {params["De"]:.7f}  1  10.00000  200.00000    1.00000 \n')
             # alpha: width parameter
             f.write(f'alpha      : {params["alpha"]:.7f}  1  0.50000  4.00000    1.00000 \n')
-            # r0: equilibrium distance
-            r0_low = max(0.8, params["r0"] - 0.2)
-            r0_high = params["r0"] + 0.2
-            f.write(f'r0         : {params["r0"]:.7f}  1  {r0_low:.5f}  {r0_high:.5f}    1.00000 \n')
             f.write('/\n\n')
         
         # ========== ANGLES (harmonic) ==========
@@ -476,7 +476,7 @@ def main():
     print(f"Template potential.in written to {output_path}")
     print(f"{'='*50}")
     print("\nFunction types used:")
-    print("  - Bonds: MorseBond (D, alpha, r0)")
+    print("  - Bonds: MorseBond (D, alpha, re)")
     print("  - Angles: harmonic (th0, k)")
     print("  - Dihedrals: Fourier (k1-k6)")
     print("  - Pair-wise: LJ (sigma, epsilon)")
