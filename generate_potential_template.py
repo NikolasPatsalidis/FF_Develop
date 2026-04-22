@@ -60,99 +60,66 @@ def parse_distance_map(distance_map_str):
         return {}
 
 
-def parse_qe_input(filepath):
+def read_qe_output_to_dataframe(filename):
     """
-    Parse a QE input file (.in) to extract atomic types, positions, and cell.
+    Read QE output file and convert to DataFrame format.
+    Uses qe_io functions from active_learning.py pattern.
     
+    Parameters
+    ----------
+    filename : str
+        Path to QE output file (.log).
+        
     Returns
     -------
-    dict with keys: 'at_type', 'coords', 'lattice', 'sys_name'
+    pd.DataFrame or None
+        DataFrame with coords, at_type, Energy, lattice columns.
     """
-    with open(filepath, 'r') as f:
-        lines = [line.strip() for line in f.readlines()]
+    lines = qe_io.read_qe_output(filename)
     
-    at_types = []
-    coords = []
-    cell = []
+    # Extract data using qe_io functions
+    at_types_list, coords_list = qe_io.extract_atomic_positions(lines)
+    energies_dict = qe_io.extract_energies(lines)
+    cells = qe_io.extract_lattice_params(lines)
     
-    reading_cell = False
-    reading_positions = False
-    reading_species = False
+    if not at_types_list:
+        print(f"No atomic positions found in {filename}")
+        return None
     
-    for i, line in enumerate(lines):
-        # Skip empty lines and comments
-        if not line or line.startswith('!'):
-            reading_cell = False
-            reading_positions = False
-            reading_species = False
-            continue
-        
-        # Detect CELL_PARAMETERS block
-        if 'CELL_PARAMETERS' in line.upper():
-            reading_cell = True
-            reading_positions = False
-            reading_species = False
-            continue
-        
-        # Detect ATOMIC_POSITIONS block
-        if 'ATOMIC_POSITIONS' in line.upper():
-            reading_positions = True
-            reading_cell = False
-            reading_species = False
-            continue
-        
-        # Detect ATOMIC_SPECIES block
-        if 'ATOMIC_SPECIES' in line.upper():
-            reading_species = True
-            reading_cell = False
-            reading_positions = False
-            continue
-        
-        # Detect end of blocks (new section starts with & or keyword)
-        if line.startswith('&') or line.startswith('/') or 'K_POINTS' in line.upper():
-            reading_cell = False
-            reading_positions = False
-            reading_species = False
-            continue
-        
-        # Parse CELL_PARAMETERS
-        if reading_cell:
-            parts = line.split()
-            if len(parts) >= 3:
-                try:
-                    vec = [float(parts[0]), float(parts[1]), float(parts[2])]
-                    cell.append(vec)
-                except ValueError:
-                    reading_cell = False
-        
-        # Parse ATOMIC_POSITIONS
-        if reading_positions:
-            parts = line.split()
-            if len(parts) >= 4:
-                try:
-                    at_types.append(parts[0])
-                    coords.append([float(parts[1]), float(parts[2]), float(parts[3])])
-                except ValueError:
-                    pass
+    # Use last configuration (final optimized structure)
+    at_types = at_types_list[-1] if at_types_list else []
+    coords = coords_list[-1] if coords_list else []
     
-    if len(cell) != 3:
-        cell = None
+    # Get cell - could be array or list of arrays
+    if isinstance(cells, list) and len(cells) > 0:
+        cell = cells[-1]
+    elif isinstance(cells, np.ndarray):
+        cell = cells
     else:
-        cell = np.array(cell)
+        cell = None
     
-    return {
-        'at_type': at_types,
-        'coords': np.array(coords) if coords else np.array([]),
-        'lattice': cell,
-        'sys_name': os.path.basename(os.path.dirname(filepath))
-    }
+    # Get energy if available
+    energy = energies_dict['e_opt'][-1] if energies_dict.get('e_opt') else None
+    
+    if len(at_types) == 0:
+        return None
+    
+    return pd.DataFrame({
+        'at_type': [list(at_types)],
+        'coords': [coords],
+        'lattice': [cell],
+        'Energy': [energy],
+        'natoms': [len(at_types)],
+        'readfile': [filename]
+    })
 
 
-def read_all_qe_inputs_from_dir(directory):
+def read_all_qe_outputs_from_dir(directory):
     """
-    Read all QE input files from data_al/L0/ subdirectories.
+    Read all QE output files from data_al/L0/ subdirectories.
+    Uses qe_io functions (same as active_learning.py _read_qe_to_dataframe).
     
-    Looks for .in files in each subdirectory of the given directory.
+    Looks for .log files in each subdirectory of the given directory.
     """
     all_data = []
     
@@ -160,50 +127,38 @@ def read_all_qe_inputs_from_dir(directory):
         print(f"Warning: Directory {directory} does not exist")
         return pd.DataFrame()
     
-    # Look for subdirectories containing .in files
-    for item in os.listdir(directory):
+    # Look for subdirectories containing .log files
+    for item in sorted(os.listdir(directory)):
         subdir = os.path.join(directory, item)
         if os.path.isdir(subdir):
-            # Look for .in files in this subdirectory
+            # Look for .log files in this subdirectory
             for fname in os.listdir(subdir):
-                if fname.endswith('.in'):
+                if fname.endswith('.log'):
                     fpath = os.path.join(subdir, fname)
                     try:
-                        data = parse_qe_input(fpath)
-                        if len(data['at_type']) > 0:
-                            df = pd.DataFrame({
-                                'at_type': [data['at_type']],
-                                'coords': [data['coords']],
-                                'lattice': [data['lattice']],
-                                'sys_name': [data['sys_name']],
-                                'natoms': [len(data['at_type'])]
-                            })
+                        df = read_qe_output_to_dataframe(fpath)
+                        if df is not None and len(df) > 0:
+                            df['sys_name'] = item
                             all_data.append(df)
-                            print(f"  Read {fpath}: {len(data['at_type'])} atoms")
+                            print(f"  Read {fpath}: {df['natoms'].iloc[0]} atoms")
                     except Exception as e:
                         print(f"Warning: Could not read {fpath}: {e}")
     
-    # Also check for .in files directly in the directory
-    for fname in os.listdir(directory):
-        if fname.endswith('.in'):
+    # Also check for .log files directly in the directory
+    for fname in sorted(os.listdir(directory)):
+        if fname.endswith('.log'):
             fpath = os.path.join(directory, fname)
             try:
-                data = parse_qe_input(fpath)
-                if len(data['at_type']) > 0:
-                    df = pd.DataFrame({
-                        'at_type': [data['at_type']],
-                        'coords': [data['coords']],
-                        'lattice': [data['lattice']],
-                        'sys_name': [fname.replace('.in', '')],
-                        'natoms': [len(data['at_type'])]
-                    })
+                df = read_qe_output_to_dataframe(fpath)
+                if df is not None and len(df) > 0:
+                    df['sys_name'] = fname.replace('.log', '')
                     all_data.append(df)
-                    print(f"  Read {fpath}: {len(data['at_type'])} atoms")
+                    print(f"  Read {fpath}: {df['natoms'].iloc[0]} atoms")
             except Exception as e:
                 print(f"Warning: Could not read {fpath}: {e}")
     
     if not all_data:
-        print(f"Warning: No QE input files found in {directory}")
+        print(f"Warning: No QE output files (.log) found in {directory}")
         return pd.DataFrame()
     
     return pd.concat(all_data, ignore_index=True)
