@@ -145,6 +145,9 @@ class ActiveLearningConfig(ConfigBase):
         'md_max_candidates': None,            # max candidates to sample; if None, run full integration_time
         # Selection method
         'selection_method': 'ood',         # 'random' or 'ood' (out-of-distribution)
+        # Init config selection for MC/MD sampling
+        'init_config_method': 'ood',       # 'boltzmann' or 'ood' - how to select starting configs
+        'ood_weight': 0.7,                 # weight for OOD score vs random (0=random, 1=pure OOD)
     }
     
     def __init__(self):
@@ -422,6 +425,8 @@ class ActiveLearningPipeline:
             print(f"ITERATION {iteration}")
             print(f"{'='*60}")
             
+            self.setup.run = iteration
+
             t_iter_start = perf_counter()
             
             # Read data
@@ -454,8 +459,10 @@ class ActiveLearningPipeline:
             
             # Update input files for next iteration (from results folder)
             self.potential_file = f"{self.setup.runpath}/potential.in"
+
             self.setup = ff.Setup_Interfacial_Optimization(self.methodology_file, self.potential_file)
             
+            self.setup.run = iteration
             # Step D: Evaluation
             self.evaluate(iteration)
             
@@ -739,9 +746,41 @@ class ActiveLearningPipeline:
         fixed_types = self.al_config.fixed_types
         langevin = LangevinDynamics(self.setup, self.al_config, mass_map, fixed_types)
         
-        # Select initial configurations for MD
+        # Select initial configurations
         n_init = min(self.al_config.md_initial_configs, len(data))
-        init_data = data.sample(n=n_init).copy()
+        init_method = getattr(self.al_config, 'init_config_method', 'boltzmann')
+        
+        # Compute Uclass and interactions
+        if 'Uclass' not in data.columns:
+            ff.al_help.evaluate_potential(data, self.setup, 'opt')
+        ff.al_help.make_interactions(data, self.setup)
+        
+        all_indexes = np.array(data.index)
+        
+        ndata = len(data)
+        if init_method == 'ood':
+            # OOD-based selection: use histogram uncertainty
+            prop_sel, _ = ff.al_help.find_histogram_uncertainty(data, data, self.setup, self.al_config.fixed_types)
+            prop_sel = np.nan_to_num(prop_sel, nan=0.0)
+            if prop_sel.sum() > 0:
+                prop_sel /= prop_sel.sum()
+            else:
+                prop_sel = None
+        elif init_method == 'boltzmann':
+            # Boltzmann-weighted selection
+            Uclass = data['Uclass'].to_numpy()
+            prop_sel = np.exp(-self.beta_sampling * (Uclass - Uclass.min()))
+            prop_sel /= prop_sel.sum()
+        else:
+            # Random selection (uniform probability)
+            prop_sel = np.ones(ndata) / ndata
+        
+        try:
+            idx_chosen = np.random.choice(all_indexes, size=n_init, replace=False, p=prop_sel)
+        except ValueError:
+            idx_chosen = np.random.choice(all_indexes, size=n_init, replace=False, p=None)
+        
+        init_data = data.loc[idx_chosen].copy()
         
         # Ensure required columns exist
         required_cols = ['coords', 'at_type', 'natoms']
@@ -893,8 +932,10 @@ class ActiveLearningPipeline:
 #SBATCH --partition={sched.partition}
 #SBATCH --time={sched.time_limit}
 #SBATCH --mem={sched.memory}
-
 """
+        if sched.account:
+            script += f"#SBATCH --account={sched.account}\n"
+        script += "\n"
         # Add module loads
         if sched.modules:
             for mod in sched.modules.split(','):
@@ -1149,7 +1190,7 @@ eval $linecm
 
         predicted_costs = self.al.predict_model(data, self.setup)
         
-        self.al.write_errors(predicted_costs, next_iter, 'predict')
+        self.al.write_errors(predicted_costs, iteration, 'predict')
         
         print(f'Evaluation time = {perf_counter() - t0:.3e} sec')
     

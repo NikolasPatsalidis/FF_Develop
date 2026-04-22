@@ -73,6 +73,537 @@ def _sum_gradient_segments(g, dl, du, n_p, data_size):
             gu[j, i] = total
     return gu
 
+# =========== BATCHED NUMBA FUNCTIONS FOR GRADIENT FORCE CALCULATIONS ===========
+@njit(parallel=True, fastmath=True, cache=True)
+def _numba_add_ij_batch(gradForces, fg, partial_ri, i_indices, j_indices):
+    """Add pairwise force gradient contributions for ALL parameters at once.
+    
+    gradForces: (n_pars, n_forces, 3)
+    fg: (n_pars, n_pairs) - derivative gradient
+    partial_ri: (n_pairs, 3) - unit vectors
+    """
+    n_pars = fg.shape[0]
+    n_pairs = len(i_indices)
+    for n in prange(n_pars):
+        for k in range(n_pairs):
+            i, j = i_indices[k], j_indices[k]
+            pw = fg[n, k]
+            for d in range(3):
+                gradForces[n, i, d] += pw * partial_ri[k, d]
+                gradForces[n, j, d] -= pw * partial_ri[k, d]
+
+@njit(parallel=True, fastmath=True, cache=True)
+def _numba_add_ij_ld_batch(gradForces, fg, to_ij, v_ij, i_indices, j_indices):
+    """Add LD pairwise force gradient contributions for ALL parameters at once."""
+    n_pars = fg.shape[0]
+    n_pairs = len(i_indices)
+    for n in prange(n_pars):
+        for k in range(n_pairs):
+            i, j = i_indices[k], j_indices[k]
+            pw = fg[n, to_ij[k]]
+            for d in range(3):
+                gradForces[n, i, d] += pw * v_ij[k, d]
+                gradForces[n, j, d] -= pw * v_ij[k, d]
+
+@njit(parallel=True, fastmath=True, cache=True)
+def _numba_add_angle_batch(gradForces, fg, pa, pc, i_indices, j_indices, k_indices):
+    """Add angle force gradient contributions for ALL parameters at once.
+    
+    gradForces: (n_pars, n_forces, 3)
+    fg: (n_pars, n_angles)
+    pa, pc: (n_angles, 3) - partial derivatives
+    """
+    n_pars = fg.shape[0]
+    n_angles = len(i_indices)
+    for n in prange(n_pars):
+        for m in range(n_angles):
+            i, j, k = i_indices[m], j_indices[m], k_indices[m]
+            fg_n = fg[n, m]
+            for d in range(3):
+                fa = pa[m, d] * fg_n
+                fc = pc[m, d] * fg_n
+                gradForces[n, i, d] += fa
+                gradForces[n, k, d] += fc
+                gradForces[n, j, d] -= (fa + fc)
+
+@njit(parallel=True, fastmath=True, cache=True)
+def _numba_add_dihedral_batch(gradForces, fg, dri, drj, drk, drl, 
+                               i_indices, j_indices, k_indices, l_indices):
+    """Add dihedral force gradient contributions for ALL parameters at once."""
+    n_pars = fg.shape[0]
+    n_dihedrals = len(i_indices)
+    for n in prange(n_pars):
+        for m in range(n_dihedrals):
+            i, j, k, l = i_indices[m], j_indices[m], k_indices[m], l_indices[m]
+            fg_n = fg[n, m]
+            for d in range(3):
+                gradForces[n, i, d] += dri[m, d] * fg_n
+                gradForces[n, j, d] += drj[m, d] * fg_n
+                gradForces[n, k, d] += drk[m, d] * fg_n
+                gradForces[n, l, d] += drl[m, d] * fg_n
+
+
+class NumbaHelpers:
+    """Numba-compiled helper functions for potential energy calculations.
+    
+    Provides optimized implementations of u_vectorized, find_dydx, and 
+    find_derivative_gradient for each potential model type.
+    """
+    
+    # ==================== harmonic ====================
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_harmonic_u_vectorized(r, r0, k):
+        return k * (r - r0) ** 2
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_harmonic_dydx(r, r0, k):
+        return 2 * k * (r - r0)
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_harmonic_derivative_gradient(r, r0, k):
+        n = r.shape[0]
+        fg = np.empty((2, n), dtype=np.float64)
+        fg[0] = -2 * k
+        fg[1] = 2 * (r - r0)
+        return fg
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_harmonic_gradient(r, r0, k):
+        n = r.shape[0]
+        g = np.empty((2, n), dtype=np.float64)
+        r_r0 = r - r0
+        g[0] = -2 * k * r_r0
+        g[1] = r_r0 * r_r0
+        return g
+    
+    # ==================== harmonic3 ====================
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_harmonic3_u_vectorized(r, r0, k1, k2, k3):
+        r_r0 = r - r0
+        r_r0m2 = r_r0 * r_r0
+        r_r0m3 = r_r0m2 * r_r0
+        r_r0m4 = r_r0m2 * r_r0m2
+        return k1 * r_r0m2 + k2 * r_r0m3 + k3 * r_r0m4
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_harmonic3_dydx(r, r0, k1, k2, k3):
+        r_r0 = r - r0
+        r_r0m2 = r_r0 * r_r0
+        r_r0m3 = r_r0m2 * r_r0
+        return 2 * k1 * r_r0 + 3 * k2 * r_r0m2 + 4 * k3 * r_r0m3
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_harmonic3_derivative_gradient(r, r0, k1, k2, k3):
+        n = r.shape[0]
+        r_r0 = r - r0
+        r_r0m2 = r_r0 * r_r0
+        r_r0m3 = r_r0m2 * r_r0
+        fg = np.empty((4, n), dtype=np.float64)
+        fg[0] = -(2 * k1 + 6 * k2 * r_r0 + 12 * k3 * r_r0m2)
+        fg[1] = 2 * r_r0
+        fg[2] = 3 * r_r0m2
+        fg[3] = 4 * r_r0m3
+        return fg
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_harmonic3_gradient(r, r0, k1, k2, k3):
+        n = r.shape[0]
+        r_r0 = r - r0
+        r_r0m2 = r_r0 * r_r0
+        r_r0m3 = r_r0m2 * r_r0
+        r_r0m4 = r_r0m2 * r_r0m2
+        g = np.empty((4, n), dtype=np.float64)
+        g[0] = -(2 * k1 * r_r0 + 3 * k2 * r_r0m2 + 4 * k3 * r_r0m3)
+        g[1] = r_r0m2
+        g[2] = r_r0m3
+        g[3] = r_r0m4
+        return g
+    
+    # ==================== LJ ====================
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_LJ_u_vectorized(r, sigma, epsilon):
+        so_r6 = (sigma / r) ** 6
+        so_r12 = so_r6 * so_r6
+        return 4 * epsilon * (so_r12 - so_r6)
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_LJ_dydx(r, sigma, epsilon):
+        so_r6 = (sigma / r) ** 6
+        so_r12 = so_r6 * so_r6
+        return 4 * epsilon * (6 * so_r6 - 12 * so_r12) / r
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_LJ_derivative_gradient(r, sigma, epsilon):
+        n = r.shape[0]
+        so_r6 = (sigma / r) ** 6
+        so_r12 = so_r6 * so_r6
+        fg = np.empty((2, n), dtype=np.float64)
+        fg[0] = 144 * epsilon * (so_r6 - 4 * so_r12) / sigma / r
+        fg[1] = 24 * (so_r6 - 2 * so_r12) / r
+        return fg
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_LJ_gradient(r, sigma, epsilon):
+        n = r.shape[0]
+        so_r6 = (sigma / r) ** 6
+        so_r12 = so_r6 * so_r6
+        g = np.empty((2, n), dtype=np.float64)
+        g[0] = 4 * epsilon * (12 * so_r12 - 6 * so_r6) / sigma
+        g[1] = 4 * (so_r12 - so_r6)
+        return g
+    
+    # ==================== MorseBond ====================
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_MorseBond_u_vectorized(r, re, De, alpha):
+        t1 = -alpha * (r - re)
+        e1 = np.exp(t1)
+        me1 = 1 - e1
+        return De * me1 * me1
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_MorseBond_dydx(r, re, De, alpha):
+        t1 = -alpha * (r - re)
+        e1 = np.exp(t1)
+        return 2 * alpha * De * (1 - e1) * e1
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_MorseBond_derivative_gradient(r, re, De, alpha):
+        n = r.shape[0]
+        r_re = r - re
+        t1 = -alpha * r_re
+        e1 = np.exp(t1)
+        e2 = np.exp(2 * t1)
+        rr = e2 - e1
+        r2r = 2 * e2 - e1
+        fg = np.empty((3, n), dtype=np.float64)
+        fg[0] = -2 * alpha * alpha * De * r2r
+        fg[1] = -2 * alpha * rr
+        fg[2] = 2 * De * (alpha * r_re * r2r - rr)
+        return fg
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_MorseBond_gradient(r, re, De, alpha):
+        n = r.shape[0]
+        r_re = r - re
+        t1 = -alpha * r_re
+        e1 = np.exp(t1)
+        me1 = 1 - e1
+        me1_e1 = me1 * e1
+        g = np.empty((3, n), dtype=np.float64)
+        g[0] = -2 * De * alpha * me1_e1
+        g[1] = me1 * me1
+        g[2] = 2 * De * r_re * me1_e1
+        return g
+    
+    # ==================== Morse ====================
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Morse_u_vectorized(r, re, De, alpha):
+        t1 = -alpha * (r - re)
+        return De * (np.exp(2.0 * t1) - 2.0 * np.exp(t1))
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Morse_dydx(r, re, De, alpha):
+        t1 = -alpha * (r - re)
+        return -2 * alpha * De * (np.exp(2 * t1) - np.exp(t1))
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Morse_derivative_gradient(r, re, De, alpha):
+        n = r.shape[0]
+        r_re = r - re
+        t1 = -alpha * r_re
+        e1 = np.exp(t1)
+        e2 = np.exp(2 * t1)
+        rr = e2 - e1
+        r2r = 2 * e2 - e1
+        fg = np.empty((3, n), dtype=np.float64)
+        fg[0] = -2 * alpha * alpha * De * r2r
+        fg[1] = -2 * alpha * rr
+        fg[2] = 2 * De * (alpha * r_re * r2r - rr)
+        return fg
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Morse_gradient(r, re, De, alpha):
+        n = r.shape[0]
+        r_re = r - re
+        t1 = -alpha * r_re
+        e1 = np.exp(t1)
+        e2 = np.exp(2 * t1)
+        rr = e2 - e1
+        g = np.empty((3, n), dtype=np.float64)
+        g[0] = 2 * De * alpha * rr
+        g[1] = rr - e1
+        g[2] = -2 * De * r_re * rr
+        return g
+    
+    # ==================== expCos ====================
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_expCos_u_vectorized(r, ke, the, lam):
+        cos_diff = np.cos(r) - np.cos(the)
+        return ke * np.exp(-lam * cos_diff * cos_diff)
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_expCos_dydx(r, ke, the, lam):
+        cos_diff = np.cos(r) - np.cos(the)
+        return ke * np.exp(-lam * cos_diff * cos_diff) * 2 * lam * np.sin(r) * cos_diff
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_expCos_derivative_gradient(r, ke, the, lam):
+        n = r.shape[0]
+        cos_diff = np.cos(r) - np.cos(the)
+        f1 = np.exp(-lam * cos_diff * cos_diff)
+        f2 = ke * f1 * 2 * lam * np.sin(r)
+        dydx = f2 * cos_diff
+        fg = np.empty((3, n), dtype=np.float64)
+        fg[0] = dydx / ke
+        fg[1] = f2 * np.sin(the) * (1 - 2 * lam * cos_diff * cos_diff)
+        fg[2] = dydx * (1 / lam - cos_diff * cos_diff)
+        return fg
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_expCos_gradient(r, ke, the, lam):
+        n = r.shape[0]
+        cos_diff = np.cos(r) - np.cos(the)
+        f1 = np.exp(-lam * cos_diff * cos_diff)
+        g = np.empty((3, n), dtype=np.float64)
+        g[0] = f1
+        g[1] = ke * f1 * cos_diff * (-2 * lam * np.sin(the))
+        g[2] = ke * f1 * cos_diff * (-cos_diff)
+        return g
+    
+    # ==================== Fourier ====================
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Fourier_u_vectorized(r, params, ua_min):
+        """Compute Fourier potential. ua_min is pre-computed minimum."""
+        n_params = params.shape[0]
+        u = np.zeros(r.shape[0], dtype=np.float64)
+        for j in range(1, n_params + 1):
+            u += params[j - 1] * (1.0 / j * np.cos(j * r))
+        return u - ua_min
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Fourier_dydx(r, params):
+        n_params = params.shape[0]
+        g = np.zeros(r.shape[0], dtype=np.float64)
+        for j in range(1, n_params + 1):
+            g += params[j - 1] * (-np.sin(j * r))
+        return g
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Fourier_derivative_gradient(r, params):
+        n_params = params.shape[0]
+        nr = r.shape[0]
+        fg = np.empty((n_params, nr), dtype=np.float64)
+        for j in range(1, n_params + 1):
+            fg[j - 1] = -np.sin(j * r)
+        return fg
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Fourier_gradient(r, params, ra_min):
+        n_params = params.shape[0]
+        nr = r.shape[0]
+        g = np.empty((n_params, nr), dtype=np.float64)
+        for j in range(1, n_params + 1):
+            inv_j = 1.0 / j
+            g[j - 1] = inv_j * np.cos(j * r) - inv_j * np.cos(j * ra_min)
+        return g
+    
+    # ==================== Bezier ====================
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Bezier_taus_power(taus, n):
+        """Precompute powers of tau: taus_power[j] = taus^j."""
+        nt = taus.shape[0]
+        taus_power = np.ones((n, nt), dtype=np.float64)
+        taus_power[1] = taus
+        for j in range(2, n):
+            taus_power[j] = taus_power[j-1] * taus
+        return taus_power
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Bezier_u_vectorized(taus, y, M):
+        """Compute Bezier potential energy."""
+        ny = y.shape[0]
+        nt = taus.shape[0]
+        
+        # Compute coefficients: coeff[j] = sum_i(y[i] * M[i,j]) for i <= j
+        coeff_y_tj = np.zeros(ny, dtype=np.float64)
+        for i in range(ny):
+            ry = y[i]
+            for j in range(i, ny):
+                coeff_y_tj[j] += ry * M[i, j]
+        
+        # Evaluate polynomial: yr = sum_j(coeff[j] * taus^j)
+        yr = np.zeros(nt, dtype=np.float64)
+        taus_power = np.ones(nt, dtype=np.float64)
+        for j in range(ny):
+            yr += coeff_y_tj[j] * taus_power
+            taus_power *= taus
+        return yr
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Bezier_dydx(taus, y, M, L, taus_power):
+        """Compute Bezier derivative w.r.t. x."""
+        n = y.shape[0]
+        nt = taus.shape[0]
+        
+        # Compute coefficients with j multiplier
+        coeff_tj = np.zeros(n, dtype=np.float64)
+        for i in range(n):
+            ry = y[i]
+            for j in range(i, n):
+                coeff_tj[j] += ry * M[i, j] * j
+        
+        # dydt = sum_{j=1}^{n-1} coeff[j] * taus^{j-1}
+        dydt = np.zeros(nt, dtype=np.float64)
+        for j in range(1, n):
+            dydt += coeff_tj[j] * taus_power[j-1]
+        
+        # dydx = dydt / L
+        dydx = dydt / L
+        return dydx, dydt
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Bezier_d2ydt2(taus, y, M, taus_power):
+        """Compute second derivative d^2y/dt^2."""
+        n = y.shape[0]
+        nt = taus.shape[0]
+        
+        coeff_tj = np.zeros(n, dtype=np.float64)
+        for i in range(n):
+            ry = y[i]
+            for j in range(i, n):
+                coeff_tj[j] += ry * M[i, j] * j * (j - 1)
+        
+        d2ydt2 = np.zeros(nt, dtype=np.float64)
+        for j in range(2, n):
+            d2ydt2 += coeff_tj[j] * taus_power[j-2]
+        
+        return d2ydt2
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_BezierPeriodic_dydx(taus, y, M, L, taus_power, sign_x):
+        """Compute BezierPeriodic derivative w.r.t. x (symmetric potential)."""
+        n = y.shape[0]
+        nt = taus.shape[0]
+        
+        coeff_tj = np.zeros(n, dtype=np.float64)
+        for i in range(n):
+            ry = y[i]
+            for j in range(i, n):
+                coeff_tj[j] += ry * M[i, j] * j
+        
+        dydt = np.zeros(nt, dtype=np.float64)
+        for j in range(1, n):
+            dydt += coeff_tj[j] * taus_power[j-1]
+        
+        dydx = dydt / L * sign_x
+        return dydx, dydt
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_Bezier_u_and_dydx(taus, y, M, L):
+        """Fused: compute u, dydx, dydt, and taus_power in one pass."""
+        n = y.shape[0]
+        nt = taus.shape[0]
+        
+        # Compute taus_power inline
+        taus_power = np.ones((n, nt), dtype=np.float64)
+        taus_power[1] = taus
+        for j in range(2, n):
+            taus_power[j] = taus_power[j-1] * taus
+        
+        # Compute coefficients for u and dydt together
+        coeff_u = np.zeros(n, dtype=np.float64)
+        coeff_d = np.zeros(n, dtype=np.float64)
+        for i in range(n):
+            ry = y[i]
+            for j in range(i, n):
+                mij = M[i, j]
+                coeff_u[j] += ry * mij
+                coeff_d[j] += ry * mij * j
+        
+        # Evaluate u = sum(coeff_u[j] * taus^j)
+        yr = np.zeros(nt, dtype=np.float64)
+        for j in range(n):
+            yr += coeff_u[j] * taus_power[j]
+        
+        # Evaluate dydt = sum(coeff_d[j] * taus^{j-1}) for j >= 1
+        dydt = np.zeros(nt, dtype=np.float64)
+        for j in range(1, n):
+            dydt += coeff_d[j] * taus_power[j-1]
+        
+        dydx = dydt / L
+        return yr, dydx, dydt, taus_power
+    
+    @staticmethod
+    @njit(fastmath=True, cache=True)
+    def _numba_BezierPeriodic_u_and_dydx(taus, y, M, L, sign_x):
+        """Fused: compute u, dydx, dydt, and taus_power for BezierPeriodic."""
+        n = y.shape[0]
+        nt = taus.shape[0]
+        
+        # Compute taus_power inline
+        taus_power = np.ones((n, nt), dtype=np.float64)
+        taus_power[1] = taus
+        for j in range(2, n):
+            taus_power[j] = taus_power[j-1] * taus
+        
+        # Compute coefficients for u and dydt together
+        coeff_u = np.zeros(n, dtype=np.float64)
+        coeff_d = np.zeros(n, dtype=np.float64)
+        for i in range(n):
+            ry = y[i]
+            for j in range(i, n):
+                mij = M[i, j]
+                coeff_u[j] += ry * mij
+                coeff_d[j] += ry * mij * j
+        
+        # Evaluate u
+        yr = np.zeros(nt, dtype=np.float64)
+        for j in range(n):
+            yr += coeff_u[j] * taus_power[j]
+        
+        # Evaluate dydt
+        dydt = np.zeros(nt, dtype=np.float64)
+        for j in range(1, n):
+            dydt += coeff_d[j] * taus_power[j-1]
+        
+        dydx = dydt / L * sign_x
+        return yr, dydx, dydt, taus_power
+
+
 class Parsers():
     """Base class for parsing molecular structure files.
 
@@ -666,34 +1197,54 @@ class al_help():
         
         candidate_data = pd.DataFrame()
         
+        # Check init config selection method
+        init_method = getattr(al_config, 'init_config_method', 'boltzmann')
+        
         for sysname in systems:
             
             # get all the data for this system
-
-            sys_data = init_data [ init_data['sys_name'] == sysname]
+            sys_data = init_data[init_data['sys_name'] == sysname]
             
             # get a copy of all the system data 
             step_data = copy.deepcopy(sys_data)
             
             # evaluate the potential
-            al_help.evaluate_potential(step_data, setup,'opt')
-            Uclass = step_data['Uclass'].to_numpy().copy()
+            al_help.evaluate_potential(step_data, setup, 'opt')
+            al_help.make_interactions(step_data, setup)
             
-            # select based on propability initial configurations to initiate the MC moves
-            prop_sel = np.exp( - (Uclass - Uclass.min())*beta_sampling )
-            prop_sel /= prop_sel.sum()
-
+            # select initial configurations based on method
             all_indexes = np.array(step_data.index)
+            n_select = min(len(step_data), mc_initial_configs)
+            
+            ndata = len(step_data)
+            if init_method == 'ood':
+                # OOD-based selection: use histogram uncertainty
+                prop_sel, _ = al_help.find_histogram_uncertainty(step_data, step_data, setup, fixed_types)
+                prop_sel = np.nan_to_num(prop_sel, nan=0.0)
+                if prop_sel.sum() > 0:
+                    prop_sel /= prop_sel.sum()
+                else:
+                    prop_sel = None
+            elif init_method == 'boltzmann':
+                # Boltzmann-weighted selection
+                Uclass = step_data['Uclass'].to_numpy().copy()
+                prop_sel = np.exp(-(Uclass - Uclass.min()) * beta_sampling)
+                prop_sel /= prop_sel.sum()
+            else:
+                # Random selection (uniform probability)
+                prop_sel = np.ones(ndata) / ndata
+
             try:
-                idx_chosen = np.random.choice(all_indexes, size= min(len(step_data) , mc_initial_configs) , replace=False, p = prop_sel)
+                idx_chosen = np.random.choice(all_indexes, size=n_select, replace=False, p=prop_sel)
             except ValueError:
-                idx_chosen = np.random.choice(all_indexes, size= min(len(step_data) , mc_initial_configs) , replace=False, p = None)
+                print('Warning: selecting init configs randomly in MC sampling')
+                idx_chosen = np.random.choice(all_indexes, size=n_select, replace=False, p=None)
             
             # select a subset of initial data (mc_initial_configs)
             step_data = step_data.loc[idx_chosen]
             
-            # evaluate previouss step
-            al_help.evaluate_potential(step_data, setup,'opt')
+            # evaluate previous step
+            al_help.evaluate_potential(step_data, setup, 'opt')
             Uclass_prev = step_data['Uclass'].to_numpy().copy()
             
             n = len(step_data)
@@ -2201,60 +2752,76 @@ class al_help():
             `(uncertainty_norm, uncertainty)` - normalized and raw uncertainty.
         """
         t0 = perf_counter()
-        def overlap(hist,x,v, a):
-            return np.trapz( hist * np.exp(- a*(v-x)**2), x ) 
-
-        ndata = len (candidate_data)
-        uncertainty = np.zeros((ndata,) , dtype = np.float64)
-
-        descriptor_info_candidates = candidate_data[ 'descriptor_info' ]
-
-        man_ex = Data_Manager(existing_data,setup)
         
+        # Vectorized overlap: compute for multiple values at once
+        def overlap_batch(hist, x, vals, a, dx):
+            """Compute overlap for multiple values at once."""
+            # vals: (N,), x: (M,), hist: (M,)
+            # diff: (N, M) = vals[:, None] - x[None, :]
+            diff = vals[:, None] - x[None, :]
+            gauss = np.exp(-a * diff**2)
+            # Trapezoidal integration: sum(hist * gauss) * dx
+            return np.sum(hist[None, :] * gauss, axis=1) * dx
+
+        ndata = len(candidate_data)
+        uncertainty = np.zeros((ndata,), dtype=np.float64)
+        descriptor_info_candidates = candidate_data['descriptor_info'].to_numpy()
+
+        man_ex = Data_Manager(existing_data, setup)
+        
+        # Pre-compute histograms
         histograms = dict()
         for model in setup.opt_models.values():
             ty = model.type
-            if np.array( [t in fixed_types for t in ty] ).all():
+            if all(t in fixed_types for t in ty):
                 continue
             fe = model.feature
             dd = man_ex.get_distribution(ty, fe)
-
-            hist, bin_edges =  np.histogram (dd , density= True, bins=200)
-            bin_centers = bin_edges[:-1] + 0.5 * ( bin_edges[1] - bin_edges[0] )
-            histograms[(ty,fe)] = (hist, bin_centers, bin_edges[-1] - bin_edges[0] )
+            hist, bin_edges = np.histogram(dd, density=True, bins=200)
+            bin_centers = bin_edges[:-1] + 0.5 * (bin_edges[1] - bin_edges[0])
+            histograms[(ty, fe)] = (hist, bin_centers, bin_edges[-1] - bin_edges[0])
         
         p = 3
-        unce_vals = [ [] for _ in range(ndata) ]
+        unce_vals = [[] for _ in range(ndata)]
 
-        for (ty, fe),(hist, x, ran) in histograms.items():
+        for (ty, fe), (hist, x, ran) in histograms.items():
+            scale = ran / 2.0
+            dx = x[1] - x[0]
             
-             
-            scale = ran/2.0
-            dr = ran/20000
+            # Compute min/max overlap with fewer points (500 vs 20000)
+            r = np.linspace(x[0], x[-1], 500)
+            ov = overlap_batch(hist, x, r, scale, dx)
+            max_overlap, min_overlap = ov.max(), ov.min()
+            denom = max(max_overlap - min_overlap, 1e-12)
             
-            r = np.arange(x[0], x[-1], dr)
-            ov = np.array([ overlap(hist,x,v, scale) for v in r])
-            max_overlap = ov.max()
-            min_overlap = ov.min()
-            
+            # Collect all values for this (ty, fe) from all candidates
+            all_vals = []
+            val_indices = []
             for j, dinfo in enumerate(descriptor_info_candidates):
                 try:
                     vals = dinfo[fe][ty]['values']
+                    all_vals.extend(vals)
+                    val_indices.extend([j] * len(vals))
                 except KeyError:
                     continue
-                unc = 0
-                for v in vals:
-                    ovr = overlap( hist, x, v , scale )
-                    unc =  1.0 - ( ovr - min_overlap) / (max_overlap - min_overlap)
-                    unce_vals[j].append( unc )
             
+            if all_vals:
+                # Single batch overlap for all values
+                overlaps = overlap_batch(hist, x, np.array(all_vals), scale, dx)
+                uncertainties = 1.0 - (overlaps - min_overlap) / denom
+                for idx, j in enumerate(val_indices):
+                    unce_vals[j].append(uncertainties[idx])
+        
+        # Final p-norm mean
         for j in range(ndata):
-            unc = np.array(unce_vals[j])
-            uncertainty[j] = np.mean(unc**p )**(1/p)
+            if unce_vals[j]:
+                unc = np.array(unce_vals[j])
+                uncertainty[j] = np.mean(unc**p)**(1/p)
         
         uncertainty = np.nan_to_num(uncertainty, 1e-8)
-        uncertainty_norm = (uncertainty - uncertainty.min() ) / ( uncertainty.max() - uncertainty.min())
-        print(' Uncertainty quantification took {:.3e} sec'.format(perf_counter() - t0 ))
+        unc_range = uncertainty.max() - uncertainty.min()
+        uncertainty_norm = (uncertainty - uncertainty.min()) / max(unc_range, 1e-12)
+        print(' Uncertainty quantification took {:.3e} sec'.format(perf_counter() - t0))
         return uncertainty_norm, uncertainty
 
 
@@ -4385,72 +4952,27 @@ class harmonic3:
     def u_vectorized(self):
         """Compute potential energy for all distances."""
         r0, k1, k2, k3 = self.params
-        r = self.r
-        
-        r_r0 = r - r0
-        r_r0m2 = r_r0*r_r0
-        r_r0m3 = r_r0m2*r_r0
-        r_r0m4 = r_r0m2*r_r0m2
-        
-        u = k1*r_r0m2 + k2*r_r0m3 + k3*r_r0m4 
-        
-        return u
+        return NumbaHelpers._numba_harmonic3_u_vectorized(self.r, r0, k1, k2, k3)
     
     def find_dydx(self):
         """Compute derivative of potential w.r.t. distance."""
         r0, k1, k2, k3 = self.params
-        r = self.r
-        r_r0 = r - r0
-        r_r0m2 = r_r0*r_r0
-        r_r0m3 = r_r0m2*r_r0
-        
-        g = 2*k1*r_r0 + 3*k2*r_r0m2 + 4*k3*r_r0m3
-        
+        g = NumbaHelpers._numba_harmonic3_dydx(self.r, r0, k1, k2, k3)
         self.dydx = g
-        
         return g
     
     def find_gradient(self):
         """Compute gradient of potential w.r.t. parameters."""
-        
         r0, k1, k2, k3 = self.params
-        r = self.r
-        r_r0 = r - r0
-        r_r0m2 = r_r0*r_r0
-        r_r0m3 = r_r0m2*r_r0
-        r_r0m4 = r_r0m2*r_r0m2
-        
-        g = np.empty((4,r.shape[0]), dtype=np.float64)
-        
-        
-        g[0] = - (2*k1*r_r0 + 3*k2*r_r0m2 + 4*k3*r_r0m3)
-        g[1] = r_r0m2 
-        g[2] = r_r0m3 
-        g[3] = r_r0m4 
-        
+        g = NumbaHelpers._numba_harmonic3_gradient(self.r, r0, k1, k2 ,k3)        
         self.params_gradient = g
-        
         return g
     
     def find_derivative_gradient(self):
         """Compute mixed second derivative (d^2U/dr/dparam)."""
-        
         r0, k1, k2, k3 = self.params
-        r = self.r
-        r_r0 = r - r0
-        r_r0m2 = r_r0*r_r0
-        r_r0m3 = r_r0m2*r_r0
-        
-        fg = np.empty((4,r.shape[0]), dtype=np.float64)
-        
-        
-        fg[0] = - (2*k1 + 6*k2*r_r0 + 12*k3*r_r0m2)
-        fg[1] = 2*r_r0 
-        fg[2] = 3*r_r0m2 
-        fg[3] = 4*r_r0m3 
-        
+        fg = NumbaHelpers._numba_harmonic3_derivative_gradient(self.r, r0, k1, k2, k3)
         self.derivative_gradient = fg
-        
         return fg
 
 
@@ -4466,43 +4988,26 @@ class harmonic:
     def u_vectorized(self):
         """Compute potential energy for all distances."""
         r0, k = self.params
-        r = self.r
-        u = k*(r-r0)**2
-        return u
+        return NumbaHelpers._numba_harmonic_u_vectorized(self.r, r0, k)
     
     def find_dydx(self):
         """Compute derivative of potential w.r.t. distance."""
         r0, k = self.params
-        r = self.r
-        g = 2*k*(r-r0)
+        g = NumbaHelpers._numba_harmonic_dydx(self.r, r0, k)
         self.dydx = g
         return g
     
     def find_gradient(self):
         """Compute gradient of potential w.r.t. parameters."""
-        
         r0, k = self.params
-        r = self.r
-        
-        g = np.empty((2,r.shape[0]), dtype=np.float64)
-        r_r0 = r - r0
-        g[0] = -2*k*(r_r0)
-        g[1] = r_r0 * r_r0
-        
+        g = NumbaHelpers._numba_harmonic_gradient(self.r, r0, k)
         self.params_gradient = g
         return g
 
     def find_derivative_gradient(self):
         """Compute mixed second derivative (d^2U/dr/dparam)."""
-        
         r0, k = self.params
-        r = self.r
-        
-        fg = np.empty((2,r.shape[0]), dtype=np.float64)
-        r_r0 = r - r0
-        fg[0] = -2*k
-        fg[1] = 2*r_r0 
-        
+        fg = NumbaHelpers._numba_harmonic_derivative_gradient(self.r, r0, k)
         self.derivative_gradient = fg
         return fg
 
@@ -4519,57 +5024,26 @@ class LJ:
     def u_vectorized(self):
         """Compute potential energy for all distances."""
         sigma, epsilon = self.params
-        r = self.r
-        
-        so_r6 = (sigma/r)**6
-        so_r12 = so_r6*so_r6
-        
-        u = 4 * epsilon * (so_r12 - so_r6) 
-        return u
-        
+        return NumbaHelpers._numba_LJ_u_vectorized(self.r, sigma, epsilon)
     
     def find_dydx(self):
         """Compute derivative of potential w.r.t. distance."""
         sigma, epsilon = self.params
-        r = self.r
-        
-        so_r6 = (sigma/r)**6
-        so_r12 = so_r6*so_r6
-        
-        g = 4 * epsilon * ( 6*so_r6 - 12*so_r12 )/r
-        
+        g = NumbaHelpers._numba_LJ_dydx(self.r, sigma, epsilon)
         self.dydx = g
         return g
        
     def find_gradient(self):
         """Compute gradient of potential w.r.t. parameters."""
         sigma, epsilon = self.params
-        r = self.r
-        
-        so_r6 = (sigma/r)**6
-        so_r12 = so_r6*so_r6
-        
-        g = np.zeros((2,r.shape[0]))
-        
-        g[0] = 4 * epsilon * (12*so_r12  - 6*so_r6 )/sigma 
-        g[1] = 4 * (so_r12 - so_r6) 
-        
+        g = NumbaHelpers._numba_LJ_gradient(self.r, sigma, epsilon)
         self.params_gradient = g
         return g
 
     def find_derivative_gradient(self):
         """Compute mixed second derivative (d^2U/dr/dparam)."""
         sigma, epsilon = self.params
-        r = self.r
-        
-        so_r6 = (sigma/r)**6
-        so_r12 = so_r6*so_r6
-        
-        fg = np.zeros((2,r.shape[0]))
-        
-        fg[0] = 144 * epsilon * (so_r6  - 4*so_r12 )/sigma/r 
-        fg[1] = 24 * (so_r6 -2*so_r12)/r 
-        
+        fg = NumbaHelpers._numba_LJ_derivative_gradient(self.r, sigma, epsilon)
         self.derivative_gradient = fg
         return fg
     
@@ -4581,78 +5055,30 @@ class MorseBond:
         self.r = r
         self.params = params
         return 
+    
     def u_vectorized(self):
         """Compute potential energy for all distances."""
-        x = self.params
-        r = self.r
-        
-        re = x[0]
-        De = x[1]
-        alpha = x[2]
-        t1 = -alpha*(r-re)
-        e1 = np.exp(t1)
-        me1 = 1 - e1
-        u = De*me1*me1
-        return u
-        
+        re, De, alpha = self.params
+        return NumbaHelpers._numba_MorseBond_u_vectorized(self.r, re, De, alpha)
     
     def find_dydx(self):
         """Compute derivative of potential w.r.t. distance."""
-        x = self.params
-        r = self.r
-        
-        re = x[0]
-        De = x[1]
-        alpha = x[2]
-        
-        t1 = - alpha*(r-re)
-        e1 = np.exp(t1)
-        g = 2 * alpha * De *(1-e1)*e1
+        re, De, alpha = self.params
+        g = NumbaHelpers._numba_MorseBond_dydx(self.r, re, De, alpha)
         self.dydx = g
         return g
        
     def find_gradient(self):
         """Compute gradient of potential w.r.t. parameters."""
-        r = self.r
-        x = self.params
-        re, De, alpha = x
-        nr = r.shape[0]
-        n = self.params.shape[0]
-        
-        g = np.zeros((n,nr))
-        
-        r_re = r-re
-        t1 = -alpha*r_re
-        e1 = np.exp(t1)
-        me1 = 1 - e1
-        me1_e1 = me1*e1
-        g[0] = -2 * De * alpha * me1_e1 #dudre
-        g[1] = me1*me1 # dudDe
-        g[2] = 2 * De * r_re * me1_e1 # dudalpha
-        
+        re, De, alpha = self.params
+        g = NumbaHelpers._numba_MorseBond_gradient(self.r, re, De, alpha)
         self.params_gradient = g
         return g
     
     def find_derivative_gradient(self):
         """Compute mixed second derivative (d^2U/dr/dparam)."""
-        r = self.r
-        x = self.params
-        re, De, alpha = x
-        nr = r.shape[0]
-        n = self.params.shape[0]
-        
-        fg = np.zeros((n,nr))
-        
-        r_re = r-re
-        t1 = -alpha*r_re
-        e1 = np.exp(t1)
-        e2 = np.exp(2*t1)
-        rr = (e2  - e1 )
-        r2r = (2*e2-e1)
-        fg[0] = -2 *  alpha * alpha * De  * r2r  #d^2udrdre
-        fg[1] = -2 * alpha * rr # d^2udrDe
-        fg[2] = 2 * De * ( alpha*r_re*r2r - rr  ) # d^22udrdalpha
-        
+        re, De, alpha = self.params
+        fg = NumbaHelpers._numba_MorseBond_derivative_gradient(self.r, re, De, alpha)
         self.derivative_gradient = fg
         return fg
 
@@ -4663,57 +5089,30 @@ class expCos:
         self.r = r
         self.params = params
         return 
+    
     def u_vectorized(self):
         """Compute potential energy for all angles."""
-        x = self.params
-        r = self.r
-        ke,the,lam = x 
-        cos_diff = np.cos(r) - np.cos(the)
-        u = ke*np.exp( -lam * cos_diff * cos_diff )
-        
-        return u
+        ke, the, lam = self.params
+        return NumbaHelpers._numba_expCos_u_vectorized(self.r, ke, the, lam)
     
     def find_dydx(self):
         """Compute derivative of potential w.r.t. angle."""
-        x = self.params
-        r = self.r
-        ke,the,lam = x 
-        cos_diff = np.cos(r) - np.cos(the)
-        g = ke*np.exp( -lam * cos_diff * cos_diff ) * 2 *lam * np.sin(r) * cos_diff
- 
+        ke, the, lam = self.params
+        g = NumbaHelpers._numba_expCos_dydx(self.r, ke, the, lam)
         self.dydx = g
         return g
        
     def find_gradient(self):
         """Compute gradient of potential w.r.t. parameters."""
-        ke,the,lam = self.params
-        r = self.r
-        nr = r.shape[0]
-        n = self.params.shape[0]
-        cos_diff = np.cos(r) - np.cos(the)
-        g = np.zeros((n,nr))
-        f1 = np.exp( -lam * cos_diff * cos_diff )
-        g[0] = f1
-        g[1] = ke * f1 * cos_diff * ( -2 * lam * np.sin(the) )
-        g[2] = ke * f1 * cos_diff * (-cos_diff)
-        
+        ke, the, lam = self.params
+        g = NumbaHelpers._numba_expCos_gradient(r, ke, the, lam)
         self.params_gradient = g
         return g
     
     def find_derivative_gradient(self):
         """Compute mixed second derivative (d^2U/dr/dparam)."""
-        ke,the,lam = self.params
-        r = self.r
-        nr = r.shape[0]
-        n = self.params.shape[0]
-        cos_diff = np.cos(r) - np.cos(the)
-        fg = np.zeros((n,nr))
-        f1 = np.exp( -lam * cos_diff * cos_diff )
-        f2 = ke * f1 * 2 *lam * np.sin(r)
-        dydx =  f2 * cos_diff
-        fg[0] = dydx/ke
-        fg[1] =  f2 * np.sin(the) * ( 1 - 2 *lam * cos_diff*cos_diff )
-        fg[2] =  dydx *(1/lam - cos_diff * cos_diff)
+        ke, the, lam = self.params
+        fg = NumbaHelpers._numba_expCos_derivative_gradient(self.r, ke, the, lam)
         self.derivative_gradient = fg
         return fg     
 
@@ -4725,66 +5124,38 @@ class Fourier:
         self.r = r
         self.params = params
         return 
+    
     def u_vectorized(self):
         """Compute potential energy for all angles, shifted so min(U) = 0."""
-        x = self.params
-        r = self.r
-        
-        n = x.shape[0]
-        u = np.zeros(r.shape)
-        for j in range(1,n+1):
-            u += x[j-1] * (j**(-1) * np.cos(j*r))
-        
-        # Shift so minimum is 0: U_shifted = U - U_min
         ua_min, _ = self.get_min()
-        
-        return u - ua_min
+        return NumbaHelpers._numba_Fourier_u_vectorized(self.r, self.params, ua_min)
 
     def get_min(self):
         x = self.params
         n = x.shape[0]
-        ra = np.arange(0, np.pi,0.01)
+        ra = np.arange(0, np.pi, 0.01)
         ua = np.zeros_like(ra)
         for j in range(1, n+1):
             ua += x[j-1] * (j**(-1) * np.cos(j*ra))
-        ra_min = ra [np.argmin(ua)]
+        ra_min = ra[np.argmin(ua)]
         return ua.min(), ra_min
     
     def find_dydx(self):
         """Compute derivative of potential w.r.t. angle."""
-        x = self.params
-        r = self.r
-        n = x.shape[0]
-        g = np.zeros(r.shape)
-        for j in range(1,n+1):
-            g += x[j-1] * ( - j*(j**(-1)) * np.sin(j*r) )
- 
+        g = NumbaHelpers._numba_Fourier_dydx(self.r, self.params)
         self.dydx = g
         return g
        
     def find_gradient(self):
         """Compute gradient of potential w.r.t. parameters."""
-        r = self.r
-        x = self.params
-        _ , ra_min = self.get_min()
-        nr = r.shape[0]
-        n = x.shape[0]
-        g = np.zeros((n,nr))
-        for j in range(1,n+1):
-            g[j-1] =  (j**(-1)) * np.cos(j*r) - (j**(-1)) * np.cos(j*ra_min)
+        _, ra_min = self.get_min()
+        g = NumbaHelpers._numba_Fourier_gradient(self.r, self.params, ra_min)
         self.params_gradient = g
         return g
     
     def find_derivative_gradient(self):
         """Compute mixed second derivative (d^2U/dr/dparam)."""
-        r = self.r
-        x = self.params
-        nr = r.shape[0]
-        n = x.shape[0]
-        
-        fg = np.zeros((n,nr))
-        for j in range(1,n+1):
-            fg[j-1] = - j*(j**(-1)) * np.sin(j*r) 
+        fg = NumbaHelpers._numba_Fourier_derivative_gradient(self.r, self.params)
         self.derivative_gradient = fg
         return fg    
 
@@ -4795,73 +5166,30 @@ class Morse:
         self.r = r
         self.params = params
         return 
+    
     def u_vectorized(self):
         """Compute potential energy for all distances."""
-        x = self.params
-        r = self.r
-        
-        re = x[0]
-        De = x[1]
-        alpha = x[2]
-        t1 = -alpha*(r-re)
-        u = De*(np.exp(2.0*t1)-2.0*np.exp(t1))
-        
-        return u
+        re, De, alpha = self.params
+        return NumbaHelpers._numba_Morse_u_vectorized(self.r, re, De, alpha)
     
     def find_dydx(self):
         """Compute derivative of potential w.r.t. distance."""
-        x = self.params
-        r = self.r
-        
-        re = x[0]
-        De = x[1]
-        alpha = x[2]
-        t1 = - alpha*(r-re)
-        g = -2 * alpha* De * (np.exp(2*t1) - np.exp(t1))
+        re, De, alpha = self.params
+        g = NumbaHelpers._numba_Morse_dydx(self.r, re, De, alpha)
         self.dydx = g
         return g
        
     def find_gradient(self):
         """Compute gradient of potential w.r.t. parameters."""
-        r = self.r
-        x = self.params
-        re, De, alpha = x
-        nr = r.shape[0]
-        n = self.params.shape[0]
-        g = np.zeros((n,nr))
-        
-        r_re = r-re
-        t1 = -alpha*r_re
-        e1 = np.exp(t1)
-        e2 = np.exp(2*t1)
-        rr = (e2  - e1 )
-        g[0] = 2 * De * alpha * rr #dudre
-        g[1] = rr - e1 # dudDe
-        g[2] = -2 * De * r_re * rr # dudalpha
-        
+        re, De, alpha = self.params
+        g = NumbaHelpers._numba_Morse_gradient(self.r, re, De, alpha)
         self.params_gradient = g
         return g
     
     def find_derivative_gradient(self):
         """Compute mixed second derivative (d^2U/dr/dparam)."""
-        r = self.r
-        x = self.params
-        re, De, alpha = x
-        nr = r.shape[0]
-        n = self.params.shape[0]
-        
-        fg = np.zeros((n,nr))
-        
-        r_re = r-re
-        t1 = -alpha*r_re
-        e1 = np.exp(t1)
-        e2 = np.exp(2*t1)
-        rr = (e2  - e1 )
-        r2r = (2*e2-e1)
-        fg[0] = -2 *  alpha * alpha * De  * r2r  #d^2udrdre
-        fg[1] = -2 * alpha * rr # d^2udrDe
-        fg[2] = 2 * De * ( alpha*r_re*r2r - rr  ) # d^22udrdalpha
-        
+        re, De, alpha = self.params
+        fg = NumbaHelpers._numba_Morse_derivative_gradient(self.r, re, De, alpha)
         self.derivative_gradient = fg
         return fg
 
@@ -4933,52 +5261,30 @@ class BezierPeriodic(MathAssist):
         
     def u_vectorized(self):
         """Compute potential energy for all angles."""
-        # 1  find taus using newton raphson from x positions(rhos)
-        ny = self.npoints
-        y = self.ycontrol
-        M = self.M
-        taus = self.taus
-        
-        coeff_y_tj = np.zeros((ny,))
-        for i in range(ny):
-            ry = y[i]
-            for j in range(i,ny):
-                mij = M[i,j]
-                coeff_y_tj[j] += ry * mij
-        yr = np.zeros((taus.size,))  # Initialize yr with the same shape as taus
-        taus_power = np.ones((taus.size,))
-    
-        for j in range(ny):
-            yr += coeff_y_tj[j] * taus_power
-            taus_power *= taus  
+        yr = NumbaHelpers._numba_Bezier_u_vectorized(self.taus, self.ycontrol, self.M)
         self.ycurve = yr
         return yr
     
+    def u_and_dydx(self):
+        """Compute potential and derivative in one fused pass (faster)."""
+        sign_x = np.sign(self.xvals)
+        yr, dydx, dydt, taus_power = NumbaHelpers._numba_BezierPeriodic_u_and_dydx(
+            self.taus, self.ycontrol, self.M, self.L, sign_x)
+        self.ycurve = yr
+        self.dydx = dydx
+        self.dydt = dydt
+        self.taus_power = taus_power
+        return yr, dydx
     
     def find_dydx(self):
         """Compute derivative of potential w.r.t. angle."""
-        y = self.ycontrol
-        M = self.M
-        n = self.npoints
-        if not hasattr(self,'taus_power'):
+        if not hasattr(self, 'taus_power'):
             self.find_taus_power()
-        
-        taus_power = self.taus_power
-        coeff_tj = np.zeros((n,))
-        
-        for i in range(n):
-            ry = y[i]
-            for j in range(i,n):
-                mij = M[i,j]
-                coeff_tj[j] += ry * mij * j
-        
-        
-        g0_1 = np.dot(taus_power[0:-1].T,coeff_tj[1:])   
-        
-        self.dydt = g0_1
-        # For symmetric potential: tau = |x|/L, so dtau/dx = sign(x)/L
-        self.dydx = g0_1/self.L * np.sign(self.xvals)
-        
+        sign_x = np.sign(self.xvals)
+        dydx, dydt = NumbaHelpers._numba_BezierPeriodic_dydx(
+            self.taus, self.ycontrol, self.M, self.L, self.taus_power, sign_x)
+        self.dydt = dydt
+        self.dydx = dydx
         return self.dydx
     
     def find_gradient(self):
@@ -5008,48 +5314,28 @@ class BezierPeriodic(MathAssist):
     
     def find_derivative_gradient(self):
         """Compute mixed second derivative (d^2U/dr/dparam)."""
-        
-        taus = self.taus
-        M = self.M
-        y = self.ycontrol
-        n = self.npoints
-        
-        if not hasattr(self,'dC'):
+        if not hasattr(self, 'dC'):
             dC = self.find_dC_vectorized()
         else:
-            dC = self.dC 
-        if not hasattr(self,'dydt'):
-           _ = self.find_dydx()
+            dC = self.dC
+        if not hasattr(self, 'dydt'):
+            _ = self.find_dydx()
         
-        taus_power = self.taus_power
-        coeff_tj = np.zeros((n,))
+        # Use numba for d2ydt2 computation
+        d2ydt2 = NumbaHelpers._numba_Bezier_d2ydt2(self.taus, self.ycontrol, self.M, self.taus_power)
+        self.d2ydt2 = d2ydt2
         
-        for i in range(n):
-            ry = y[i]
-            for j in range(i,n):
-                mij = M[i,j]
-                coeff_tj[j] += ry * mij * j * (j-1)
-        
-        g0_1 = np.dot(taus_power[0:-2].T,coeff_tj[2:])   
-        
-        self.d2ydt2 = g0_1
-        
-        
-        nt = taus.shape[0]
-        fg = np.zeros((self.params.shape[0],nt))
+        nt = self.taus.shape[0]
+        fg = np.zeros((self.params.shape[0], nt))
         L = self.L
-        
-        # For symmetric potential: tau = |x|/L, so dtau/dx = sign(x)/L
         sign_x = np.sign(self.xvals)
         
-        fg[0] = (dC[0] + dC[-1]  + dC[1] + dC[2] + dC[-2] + dC[-3])/L * sign_x
-        
-        fg[1] = (dC[1] - dC[-2])/L * sign_x
-        fg[2] = (dC[2] - dC[-3])/L * sign_x
-        fg[3:] = dC[3:-3]/L * sign_x
+        fg[0] = (dC[0] + dC[-1] + dC[1] + dC[2] + dC[-2] + dC[-3]) / L * sign_x
+        fg[1] = (dC[1] - dC[-2]) / L * sign_x
+        fg[2] = (dC[2] - dC[-3]) / L * sign_x
+        fg[3:] = dC[3:-3] / L * sign_x
         
         self.params_gradient = fg
-        
         return fg
     
     def find_dydyc_numerically(self,epsilon=1e-3):
@@ -5069,16 +5355,7 @@ class BezierPeriodic(MathAssist):
     
     def find_taus_power(self):
         """Precompute powers of tau for efficient evaluation."""
-        n = self.npoints
-        taus = self.taus
-         
-        nt = taus.shape[0]
-        taus_power = np.ones((n,nt))
-         
-        taus_power[1] = taus.copy()
-        for j in range(2,n):
-            taus_power[j] = taus_power[j-1]*taus
-        self.taus_power = taus_power
+        self.taus_power = NumbaHelpers._numba_Bezier_taus_power(self.taus, self.npoints)
         return
 
     def find_dydyc_vectorized(self):
@@ -5228,51 +5505,27 @@ class Bezier(MathAssist):
     
     def u_vectorized(self):
         """Compute potential energy (vectorized implementation)."""
-        # 1  find taus using newton raphson from x positions(rhos)
-        ny = self.npoints
-        y = self.ycontrol
-        M = self.M
-        taus = self.taus
-        
-        coeff_y_tj = np.zeros((ny,))
-        for i in range(ny):
-            ry = y[i]
-            for j in range(i,ny):
-                mij = M[i,j]
-                coeff_y_tj[j] += ry * mij
-        yr = np.zeros((taus.size,))  # Initialize yr with the same shape as taus
-        taus_power = np.ones((taus.size,))
-    
-        for j in range(ny):
-            yr += coeff_y_tj[j] * taus_power
-            taus_power *= taus  
+        yr = NumbaHelpers._numba_Bezier_u_vectorized(self.taus, self.ycontrol, self.M)
         self.ycurve = yr
         return yr
     
+    def u_and_dydx(self):
+        """Compute potential and derivative in one fused pass (faster)."""
+        yr, dydx, dydt, taus_power = NumbaHelpers._numba_Bezier_u_and_dydx(
+            self.taus, self.ycontrol, self.M, self.L)
+        self.ycurve = yr
+        self.dydx = dydx
+        self.dydt = dydt
+        self.taus_power = taus_power
+        return yr, dydx
     
     def find_dydx(self):
         """Compute derivative of potential w.r.t. distance."""
-        y = self.ycontrol
-        M = self.M
-        n = self.npoints
-        if not hasattr(self,'taus_power'):
+        if not hasattr(self, 'taus_power'):
             self.find_taus_power()
-        
-        taus_power = self.taus_power
-        coeff_tj = np.zeros((n,))
-        
-        for i in range(n):
-            ry = y[i]
-            for j in range(i,n):
-                mij = M[i,j]
-                coeff_tj[j] += ry * mij * j
-        
-        
-        g0_1 = np.dot(taus_power[0:-1].T,coeff_tj[1:])   
-        
-        self.dydt = g0_1
-        self.dydx = g0_1/self.L # dydt*dtdx
-        
+        dydx, dydt = NumbaHelpers._numba_Bezier_dydx(self.taus, self.ycontrol, self.M, self.L, self.taus_power)
+        self.dydt = dydt
+        self.dydx = dydx
         return self.dydx
     
     def find_gradient(self):
@@ -5302,46 +5555,27 @@ class Bezier(MathAssist):
     
     def find_derivative_gradient(self):
         """Compute mixed second derivative (d^2U/dr/dparam)."""
-        
-        taus = self.taus
-        M = self.M
-        y = self.ycontrol
-        n = self.npoints
-        
-        if not hasattr(self,'dC'):
+        if not hasattr(self, 'dC'):
             dC = self.find_dC_vectorized()
         else:
-            dC = self.dC 
-        if not hasattr(self,'dydt'):
-           _ = self.find_dydx()
+            dC = self.dC
+        if not hasattr(self, 'dydt'):
+            _ = self.find_dydx()
         
-        taus_power = self.taus_power
-        coeff_tj = np.zeros((n,))
+        # Use numba for d2ydt2 computation
+        d2ydt2 = NumbaHelpers._numba_Bezier_d2ydt2(self.taus, self.ycontrol, self.M, self.taus_power)
+        self.d2ydt2 = d2ydt2
         
-        for i in range(n):
-            ry = y[i]
-            for j in range(i,n):
-                mij = M[i,j]
-                coeff_tj[j] += ry * mij * j * (j-1)
-        
-        g0_1 = np.dot(taus_power[0:-2].T,coeff_tj[2:])   
-        
-        self.d2ydt2 = g0_1
-        
-        
-        nt = taus.shape[0]
-        fg = np.zeros((self.params.shape[0],nt))
+        nt = self.taus.shape[0]
+        fg = np.zeros((self.params.shape[0], nt))
         L = self.L
         
-        fg[0] = ( -1/(L*L) )*(self.dydt + self.taus*g0_1) # dydt*dtdL
-        
-        fg[1] = (dC[0] + dC[1] + dC[2])/L
-        fg[-1] = (dC[-1] + dC[-2] + dC[-3])/L
-        
-        fg[2:-1] = dC[3:-3]/L
+        fg[0] = (-1/(L*L)) * (self.dydt + self.taus * d2ydt2)
+        fg[1] = (dC[0] + dC[1] + dC[2]) / L
+        fg[-1] = (dC[-1] + dC[-2] + dC[-3]) / L
+        fg[2:-1] = dC[3:-3] / L
         
         self.params_gradient = fg
-        
         return fg
     
     def find_dydyc_numerically(self,epsilon=1e-3):
@@ -5361,16 +5595,7 @@ class Bezier(MathAssist):
     
     def find_taus_power(self):
         """Precompute powers of tau for efficient evaluation."""
-        n = self.npoints
-        taus = self.taus
-         
-        nt = taus.shape[0]
-        taus_power = np.ones((n,nt))
-         
-        taus_power[1] = taus.copy()
-        for j in range(2,n):
-            taus_power[j] = taus_power[j-1]*taus
-        self.taus_power = taus_power
+        self.taus_power = NumbaHelpers._numba_Bezier_taus_power(self.taus, self.npoints)
         return
 
     def find_dydyc_vectorized(self):
@@ -8862,6 +9087,7 @@ class FF_Optimizer(Optimizer):
         """Compute total classical energy for all data points."""
         Uclass = np.zeros(ne,dtype=float)
         npars_old = 0
+        #timings = []
         for minf in models_list_info:
             #t0 = perf_counter()
             npars_new = npars_old  + minf.n_notfixed
@@ -8871,16 +9097,17 @@ class FF_Optimizer(Optimizer):
                                                     minf.fixed_params,
                                                     minf.isnot_fixed,
                                                     )
-            #print('overhead {:4.6f} sec'.format(perf_counter()-t0))
-            #compute Uclass
             
             Utemp = FF_Optimizer.UperModelContribution( minf.u_model,
                     minf.dists, minf.dl, minf.du,
                     model_pars, *minf.model_args)
-            #print(minf.name, Utemp)
             Uclass += Utemp
-            #print('computation {:4.6f} sec'.format(perf_counter()-t0))
+            #timings.append((minf.name, perf_counter()-t0, minf.dists.shape[0]))
             npars_old = npars_new
+        #print("computeUclass timing:")
+        #for name, dt, ndists in timings:
+        #    print(f"  {name}: {dt*1000:.2f}ms ({ndists} dists)")
+        #print(f"  TOTAL: {sum(t for _,t,_ in timings)*1000:.2f}ms")
         return Uclass
     
     @staticmethod
@@ -8889,6 +9116,7 @@ class FF_Optimizer(Optimizer):
         n_p = params.shape[0]
         Uclass_grad = np.zeros((n_p,ne), dtype=np.float64)
         npars_old = 0
+        #timings = []
         for minf in models_list_info:
             #t0 = perf_counter()
             npars_new = npars_old  + minf.n_notfixed
@@ -8905,8 +9133,12 @@ class FF_Optimizer(Optimizer):
                     model_pars, *minf.model_args)
 
             Uclass_grad[npars_old: npars_new] = gu[minf.isnot_fixed]
-           
+            #timings.append((minf.name, perf_counter()-t0, minf.dists.shape[0]))
             npars_old = npars_new
+        #print("gradUclass timing:")
+        #for name, dt, ndists in timings:
+        #    print(f"  {name}: {dt*1000:.2f}ms ({ndists} dists)")
+        #print(f"  TOTAL: {sum(t for _,t,_ in timings)*1000:.2f}ms")
         return Uclass_grad
     
     @staticmethod
@@ -8915,9 +9147,10 @@ class FF_Optimizer(Optimizer):
 
         Forces_tot =  np.zeros( ( n_forces ,3), dtype=np.float64) 
         npars_old = 0
+        #timings = []
         for model_info in models_list_info:
-            Forces =  np.zeros( (  n_forces ,3), dtype=np.float64)   
             #t0 = perf_counter()
+            Forces =  np.zeros( (  n_forces ,3), dtype=np.float64)   
            
             npars_new = npars_old  + model_info.n_notfixed
             
@@ -8929,10 +9162,14 @@ class FF_Optimizer(Optimizer):
             
             FF_Optimizer.ForcesPerModel(Forces, model_pars, model_info)
             
-            
             npars_old = npars_new
             Forces_tot += Forces
+            #timings.append((model_info.name, perf_counter()-t0, model_info.dists.shape[0]))
 
+        #print("computeForceClass timing:")
+        #for name, dt, ndists in timings:
+        #    print(f"  {name}: {dt*1000:.2f}ms ({ndists} dists)")
+        #print(f"  TOTAL: {sum(t for _,t,_ in timings)*1000:.2f}ms")
         return Forces_tot
     
     @staticmethod
@@ -8941,10 +9178,11 @@ class FF_Optimizer(Optimizer):
         
         gradForces_tot =  np.zeros( (params.shape[0], n_forces ,3), dtype=np.float64) 
         npars_old = 0
+        #timings = []
         for model_info in models_list_info:
+            #t0 = perf_counter()
             gradForces =  np.zeros( ( model_info.n_pars,  n_forces ,3),
                                dtype=np.float64)   
-            #t0 = perf_counter()
            
             npars_new = npars_old  + model_info.n_notfixed
             
@@ -8957,14 +9195,22 @@ class FF_Optimizer(Optimizer):
             FF_Optimizer.gradForcesPerModel(gradForces, model_pars, model_info)
             
             gradForces_tot[npars_old: npars_new] = gradForces[model_info.isnot_fixed]
-            
+            #timings.append((model_info.name, perf_counter()-t0, model_info.dists.shape[0]))
             npars_old = npars_new
             
+        #print("computeGradForceClass timing:")
+        #for name, dt, ndists in timings:
+        #    print(f"  {name}: {dt*1000:.2f}ms ({ndists} dists)")
+        #print(f"  TOTAL: {sum(t for _,t,_ in timings)*1000:.2f}ms")
         return gradForces_tot
     
     @staticmethod
     def gradForcesPerModel(gradForces, model_pars, model_info ):
-        """Compute gradient of forces w.r.t. parameters for a single model."""
+        """Compute gradient of forces w.r.t. parameters for a single model.
+        
+        Uses batched numba functions to process all parameters at once,
+        avoiding Python loop overhead.
+        """
         dists = model_info.dists
         if dists.shape[0] == 0: 
             return
@@ -8974,36 +9220,26 @@ class FF_Optimizer(Optimizer):
         
         i_index = model_info.i_indexes
         j_index = model_info.j_indexes
-        #ntotal = number of forces
         # F = -dU/dr, so dF/dθ = -d²U/(dr·dθ)
         fg = -compute_obj.find_derivative_gradient() #shape = (npars, ntotal)
-        nf = fg.shape[1]
+        
         if model_info.category == 'PW' or model_info.category == 'BO':
-            for n in range(n_pars):
-                pw_ij = fg[n].reshape( (nf,1) )*model_info.partial_ri
-                FF_Optimizer.numba_add_ij(gradForces[n], pw_ij, i_index, j_index)
+            # Batched version: process all parameters at once
+            _numba_add_ij_batch(gradForces, fg, model_info.partial_ri, i_index, j_index)
             
         elif model_info.category == 'LD':
-            for n in range(n_pars):
-                pw_ij = fg[n].reshape( (nf,1) )[ model_info.to_ij ]*model_info.v_ij
-                FF_Optimizer.numba_add_ij(gradForces[n], pw_ij, i_index, j_index)
+            _numba_add_ij_ld_batch(gradForces, fg, model_info.to_ij, model_info.v_ij, 
+                                   i_index, j_index)
         elif model_info.category =='AN':
             k_index = model_info.k_indexes
-            for n in range(n_pars):
-                fa = model_info.pa*fg[n].reshape( (nf,1) )
-                fc = model_info.pc*fg[n].reshape( (nf,1) )
-                FF_Optimizer.numba_add_angle(gradForces[n], fa, fc, i_index, j_index, k_index)
+            _numba_add_angle_batch(gradForces, fg, model_info.pa, model_info.pc,
+                                   i_index, j_index, k_index)
         elif model_info.category =='DI':
             k_index = model_info.k_indexes
             l_index = model_info.l_indexes
-            for n in range(n_pars):
-                fg_resh = fg[n].reshape( (nf,1) )
-                fi = model_info.dri*fg_resh
-                fj = model_info.drj*fg_resh
-                fk = model_info.drk*fg_resh
-                fl = model_info.drl*fg_resh
-                FF_Optimizer.numba_add_dihedral(gradForces[n], fi, fj, fk, fl,
-                                        i_index, j_index, k_index, l_index)
+            _numba_add_dihedral_batch(gradForces, fg, model_info.dri, model_info.drj,
+                                      model_info.drk, model_info.drl,
+                                      i_index, j_index, k_index, l_index)
         
         return
     
@@ -9049,9 +9285,10 @@ class FF_Optimizer(Optimizer):
                                         i_index, j_index, k_index, l_index)
         return
     
+    @jit(nopython=True, fastmath=True)
     def numba_add_dihedral(forces,fi, fj, fk, fl , i_indices, j_indices, k_indices, l_indices):
         """Add dihedral force contributions to atom forces."""
-        for m in prange(len(i_indices)):
+        for m in range(len(i_indices)):
             i, j, k, l = i_indices[m] , j_indices[m], k_indices[m], l_indices[m]
             forces[i] += fi[m]
             forces[j] += fj[m]
@@ -9059,20 +9296,20 @@ class FF_Optimizer(Optimizer):
             forces[l] += fl[m]
         return
     
-    @jit(nopython=True,fastmath=True)
+    @jit(nopython=True, fastmath=True)
     def numba_add_angle(forces, fa,fc, i_indices, j_indices,k_indices):
         """Add angle force contributions to atom forces."""
-        for m in prange(len(i_indices)):
+        for m in range(len(i_indices)):
             i, j, k = i_indices[m] , j_indices[m], k_indices[m]
             forces[i] += fa[m]
             forces[k] += fc[m]
             forces[j] -= (fa[m]+fc[m])
         return
     
-    @jit(nopython=True,fastmath=True)
+    @jit(nopython=True, fastmath=True)
     def numba_add_ij(forces, pairwise_forces, i_indices, j_indices):
         """Add pairwise force contributions to atom forces."""
-        for k in prange(len(i_indices)):
+        for k in range(len(i_indices)):
             i, j = i_indices[k], j_indices[k]
             forces[i] += pairwise_forces[k]
             forces[j] -= pairwise_forces[k]
@@ -10643,18 +10880,25 @@ class FF_Optimizer(Optimizer):
                 
                 log_every=10
                 while epoch < maxiter:
+                    t_epoch = perf_counter()
                     # Shuffle batch order at each epoch
                     batch_order = np.random.permutation(n_batches)
                     
+                    t_batches = perf_counter()
+                    t_grad_total = 0.0
+                    t_update_total = 0.0
                     for batch_idx in batch_order:
                         batch_args = batch_args_dict[batch_idx]
                         
                         t += 1
                         
                         # Compute gradient on batch
+                        t_grad = perf_counter()
                         grad = self.gradCost(params, *batch_args)
+                        t_grad_total += perf_counter() - t_grad
                         
                         # Update biased first moment estimate
+                        t_upd = perf_counter()
                         m = beta1 * m + (1 - beta1) * grad
                         
                         # Update biased second raw moment estimate
@@ -10675,12 +10919,18 @@ class FF_Optimizer(Optimizer):
                         # Clip to bounds
                         for i, (lb, ub) in enumerate(bounds):
                             params[i] = np.clip(params[i], lb, ub)
+                        t_update_total += perf_counter() - t_upd
+                    t_batches = perf_counter() - t_batches
                     
                     # Evaluate on full training set at end of epoch
+                    t_train = perf_counter()
                     train_cost = self.CostFunction(params, *full_args)
+                    t_train = perf_counter() - t_train
                     
                     # Evaluate on dev set for best model selection
+                    t_dev = perf_counter()
                     dev_cost = self.CostFunction(params, *dev_args)
+                    t_dev = perf_counter() - t_dev
                     cost_history.append(dev_cost)
                     
                     # Store best params based on dev set performance
@@ -10720,7 +10970,12 @@ class FF_Optimizer(Optimizer):
                             sys.stdout.flush()
                     
                     if epoch % log_every == 0 or epoch < log_every:
-                        print(f'Adam Epoch {epoch}, Train Cost = {train_cost:.6e}, Dev Cost = {dev_cost:.6e}, LR = {lr_t:.4e}')
+                        epoch_time = perf_counter() - t_epoch
+                        total_time = perf_counter() - tmethod
+                        t_overhead = t_batches - t_grad_total - t_update_total
+                        print(f'Adam Epoch {epoch}, Train={train_cost:.4e}, Dev={dev_cost:.4e} | '
+                              f'Grad={t_grad_total*1000:.0f}ms, Upd={t_update_total*1000:.0f}ms, Overhead={t_overhead*1000:.0f}ms, '
+                              f'TrainEval={t_train*1000:.0f}ms, DevEval={t_dev*1000:.0f}ms, Epoch={epoch_time:.2f}s')
                         sys.stdout.flush()
                     
                     epoch += 1
