@@ -1735,6 +1735,7 @@ class al_help():
         
         #train_indexes, dev_indexes = Data_Manager(data,setup).train_development_split()
         indexes = data.index
+        temp_opt = setup.optimize
         setup.optimize = False
 
         optimizer = FF_Optimizer(data,indexes, indexes, setup)
@@ -1743,6 +1744,7 @@ class al_help():
         #optimizer.optimize_params()
         optimizer.set_UFclass_ondata(which = which,dataset='all')
         
+        setup.optimize = temp_opt
 
         return optimizer
 
