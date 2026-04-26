@@ -6045,7 +6045,7 @@ class Setup_Interfacial_Optimization():
         'epsilon_adam':1e-8,
         'batch_size':64,
         'decay_rate':0.0,
-        'grad_clip':None,  # gradient clipping threshold (None = no clipping)
+        'grad_clip':5.0,  # gradient clipping threshold (None = no clipping)
         'escape_window':100,
         'max_escape_moves':5,
         'gamma_escape':0.1,
