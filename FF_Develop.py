@@ -6045,6 +6045,7 @@ class Setup_Interfacial_Optimization():
         'epsilon_adam':1e-8,
         'batch_size':64,
         'decay_rate':0.0,
+        'grad_clip':None,  # gradient clipping threshold (None = no clipping)
         'escape_window':100,
         'max_escape_moves':5,
         'gamma_escape':0.1,
@@ -10681,6 +10682,7 @@ class FF_Optimizer(Optimizer):
                 
                 lr = self.setup.learning_rate
                 decay_rate = self.setup.decay_rate
+                grad_clip = self.setup.grad_clip
                 batch_size = self.setup.batch_size
                 escape_window = self.setup.escape_window
                 max_escape_moves = self.setup.max_escape_moves
@@ -10742,6 +10744,12 @@ class FF_Optimizer(Optimizer):
                         
                         # Compute gradient on batch
                         grad = self.gradCost(params, *batch_args)
+                        
+                        # Gradient clipping
+                        if grad_clip is not None:
+                            grad_norm = np.linalg.norm(grad)
+                            if grad_norm > grad_clip:
+                                grad = grad * (grad_clip / grad_norm)
                         
                         # Learning rate decay
                         lr_t = lr / (1.0 + decay_rate * total_iterations)
@@ -10821,6 +10829,7 @@ class FF_Optimizer(Optimizer):
                 
                 lr = self.setup.learning_rate
                 decay_rate = self.setup.decay_rate
+                grad_clip = self.setup.grad_clip
                 beta1 = self.setup.beta1
                 beta2 = self.setup.beta2
                 epsilon = self.setup.epsilon_adam
@@ -10898,6 +10907,12 @@ class FF_Optimizer(Optimizer):
                         t_grad = perf_counter()
                         grad = self.gradCost(params, *batch_args)
                         t_grad_total += perf_counter() - t_grad
+                        
+                        # Gradient clipping
+                        if grad_clip is not None:
+                            grad_norm = np.linalg.norm(grad)
+                            if grad_norm > grad_clip:
+                                grad = grad * (grad_clip / grad_norm)
                         
                         # Update biased first moment estimate
                         t_upd = perf_counter()
