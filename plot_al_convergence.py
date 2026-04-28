@@ -63,25 +63,27 @@ def main():
     ax1.set_ylabel('MAE Energy (kcal/mol)', fontsize=10, color='dimgray')
     ax1.grid(True, alpha=0.3, linestyle='--')
     if show_train:
-        ax1.plot(iterations_costs, train_energy, '-', marker='o', fillstyle='none', color='silver', label='Train E', markersize=4)
+        ax1.plot(iterations_costs, train_energy, '-', marker='o', color='silver', label='Train E', markersize=4)
     if show_dev:
-        ax1.plot(iterations_costs, dev_energy, '--', marker='s', fillstyle='none', color='gray', label='Dev E', markersize=4)
+        ax1.plot(iterations_costs, dev_energy, '--', marker='s', color='gray', label='Dev E', markersize=4)
     if show_pred and pred_energy is not None:
-        ax1.plot(iterations_pred, pred_energy, ':', marker='^', fillstyle='none', color='black', label='Pred E', markersize=4)
+        ax1.plot(iterations_pred, pred_energy, ':', marker='^', color='black', label='Pred E', markersize=4)
     ax1.tick_params(axis='y', labelcolor='dimgray')
-    ax1.set_yscale('log')    
-    ax1.legend(loc='upper center', frameon=False, fontsize=7)
+    ax1.set_yscale('log')
     
     # Right y-axis: MAE Forces (red scale: light to dark)
     ax2 = ax1.twinx()
     ax2.set_ylabel('MAE Forces (kcal/mol/Å)', fontsize=10, color='darkred')
     if show_train:
-        ax2.plot(iterations_costs, train_forces, '-', marker='o', color='lightcoral', label='Train F', markersize=6)
+        ax2.plot(iterations_costs, train_forces, '-', marker='o', fillstyle='none', color='lightcoral', label='Train F', markersize=6)
     if show_dev:
-        ax2.plot(iterations_costs, dev_forces, '--', marker='s', color='indianred', label='Dev F', markersize=6)
+        ax2.plot(iterations_costs, dev_forces, '--', marker='s', fillstyle='none', color='indianred', label='Dev F', markersize=6)
     if show_pred and pred_forces is not None:
-        ax2.plot(iterations_pred, pred_forces, ':', marker='^', color='darkred', label='Pred F', markersize=6)
+        ax2.plot(iterations_pred, pred_forces, ':', marker='^', fillstyle='none', color='darkred', label='Pred F', markersize=6)
     ax2.tick_params(axis='y', labelcolor='darkred')
+    
+    # Plot legends after all data
+    ax1.legend(loc='upper center', frameon=False, fontsize=7)
     ax2.legend(loc='upper right', frameon=False, fontsize=7)
     
     fig.tight_layout()
