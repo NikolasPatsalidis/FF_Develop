@@ -11513,10 +11513,12 @@ class Interfacial_Evaluator(Evaluator):
         plt.tick_params(direction='in', which='minor',length=size)
         plt.tick_params(direction='in', which='major',length=2*size)
         
-        xmin = x_data.min()
-        xmax = x_data.max()
+        xmin = min(x_data.min(), y_data.min())
+        xmax = max(x_data.max(), y_data.max())
         air = scale*(xmax-xmin)
         perf_line = [xmin - air , xmax + air]
+        plt.xlim(perf_line)
+        plt.ylim(perf_line)
         plt.xticks(fontsize=3.0*size)
         plt.yticks(fontsize=3.0*size)
         if title is not None:
@@ -11547,10 +11549,12 @@ class Interfacial_Evaluator(Evaluator):
                 plt.minorticks_on()
                 plt.tick_params(direction='in', which='minor',length=size)
                 plt.tick_params(direction='in', which='major',length=2*size)
-                xmin = x_data[f].min()
-                xmax = x_data[f].max()
+                xmin = min(x_data[f].min(), y_data[f].min())
+                xmax = max(x_data[f].max(), y_data[f].max())
                 air = scale*(xmax-xmin)
                 perf_line = [xmin - air , xmax + air]
+                plt.xlim(perf_line)
+                plt.ylim(perf_line)
                 plt.plot(perf_line,perf_line, ls='--', color='k',lw=size/2)
                 
                 plt.plot(x_data[f], y_data[f],label=c,ls='None',color=colors[i],
