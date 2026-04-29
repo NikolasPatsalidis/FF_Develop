@@ -82,9 +82,9 @@ def main():
         ax2.plot(iterations_pred, pred_forces, ':', marker='^', fillstyle='none', color='darkred', label='Pred F', markersize=6)
     ax2.tick_params(axis='y', labelcolor='darkred')
     
-    # Plot legends after all data
-    ax1.legend(loc='upper center', frameon=False, fontsize=7)
-    ax2.legend(loc='upper right', frameon=False, fontsize=7)
+    # Plot legends after all data - place outside plot area to avoid overlap
+    ax1.legend(loc='upper left', bbox_to_anchor=(0.0, -0.12), frameon=False, fontsize=7, ncol=3)
+    ax2.legend(loc='upper right', bbox_to_anchor=(1.0, -0.12), frameon=False, fontsize=7, ncol=3)
     
     fig.tight_layout()
     plt.title('AL Convergence', fontsize=10)
