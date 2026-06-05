@@ -12,8 +12,7 @@ import numpy as np
 from FF_Develop import (
     Setup_Interfacial_Optimization, 
     Data_Manager, 
-    al_help,
-    FF_Optimizer
+    al_help
 )
 
 def main():
@@ -26,21 +25,19 @@ def main():
 
     # Initialize setup
     setup = Setup_Interfacial_Optimization(args.training, args.potential)
-    dataMan = Data_Manager()
-    alh = al_help()
 
-    # Load data
+    # Load data from directory (using static method)
     print(f"Loading data from {args.data_dir}...")
-    data = dataMan.load_data(args.data_dir)
+    data = al_help.data_from_directory(args.data_dir)
     print(f"Loaded {len(data)} configurations")
 
     # Make interactions (compute descriptors)
     print("Computing interactions...")
-    alh.make_interactions(data, setup)
+    al_help.make_interactions(data, setup)
 
     # Evaluate potential (adds Uclass and Fclass columns)
     print("Evaluating potential...")
-    alh.evaluate_potential(data, setup, 'init')
+    al_help.evaluate_potential(data, setup, 'init')
 
     # Compute errors
     E_dft = data['Energy'].to_numpy()
@@ -57,9 +54,9 @@ def main():
     else:
         output_file = args.output
 
-    # Save with Uclass included in labels
+    # Save with Uclass included in labels (static method)
     print(f"\nSaving to {output_file}...")
-    dataMan.save_selected_data(
+    Data_Manager.save_selected_data(
         output_file, 
         data, 
         labels=['sys_name', 'Energy', 'Uclass']
