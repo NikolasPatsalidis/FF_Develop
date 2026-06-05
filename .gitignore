@@ -9,6 +9,7 @@
 !qe_io.py
 !plot_al_convergence.py
 !generate_potential_template.py
+!evaluate_and_save_frames.xyz
 
 # Keep tests
 !Tools
