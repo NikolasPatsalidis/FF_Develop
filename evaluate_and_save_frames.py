@@ -12,7 +12,7 @@ import numpy as np
 from FF_Develop import (
     Setup_Interfacial_Optimization, 
     Data_Manager, 
-    AL_help,
+    al_help,
     FF_Optimizer
 )
 
@@ -27,7 +27,7 @@ def main():
     # Initialize setup
     setup = Setup_Interfacial_Optimization(args.training, args.potential)
     dataMan = Data_Manager()
-    al_help = AL_help()
+    alh = al_help()
 
     # Load data
     print(f"Loading data from {args.data_dir}...")
@@ -36,11 +36,11 @@ def main():
 
     # Make interactions (compute descriptors)
     print("Computing interactions...")
-    al_help.make_interactions(data, setup)
+    alh.make_interactions(data, setup)
 
     # Evaluate potential (adds Uclass and Fclass columns)
     print("Evaluating potential...")
-    al_help.evaluate_potential(data, setup, 'init')
+    alh.evaluate_potential(data, setup, 'init')
 
     # Compute errors
     E_dft = data['Energy'].to_numpy()
