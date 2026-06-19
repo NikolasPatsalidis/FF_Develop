@@ -114,9 +114,11 @@ class ActiveLearningConfig(ConfigBase):
         'batch_size': 100,
         'sigma_init': 0.02,                   # initial sigma for perturbation/MC
         'target_temperature': 500.0,
-        'sampling_method_schedule': 'auto',   # 'auto', 'perturbation', 'mc', 'md'
-        'perturbation_iterations': 0,         # iterations 0 to this use perturbation
-        'mc_iterations': 9,                   # iterations up to this use MC
+        'sampling_method_schedule': 'auto',   # 'auto', 'perturbation', 'mc', 'md', 'translate'
+        'perturbation_iterations': '',        # iteration intervals, e.g. '0-2, 5'
+        'mc_iterations': '',                  # iteration intervals, e.g. '3-10, 15-20'
+        'md_iterations': '',                  # iteration intervals, e.g. '11-14, 21-30'
+        'translate_iterations': '',           # iteration intervals, e.g. '31-40'
         'fixed_types': [],
         # MC sampling parameters
         'max_mc_steps': 4000,                # maximum MC steps per system
@@ -143,6 +145,11 @@ class ActiveLearningConfig(ConfigBase):
         'md_sampling_time': 10.0,             # store configurations every this many fs
         'md_save_traj': 'no',                 # 'no', 'sampled', 'full' - save trajectory to xyz
         'md_max_candidates': None,            # max candidates to sample; if None, run full integration_time
+        # Grid translation sampling parameters
+        'translate_direction': [0, 0, 1],     # direction vector for translation (will be normalized)
+        'translate_dr': 0.1,                  # step size in Angstrom
+        'translate_init_configs': 10,         # number of starting configurations
+        'translate_steps': 70,                # number of translation steps per config
         # Selection method
         'selection_method': 'ood',         # 'random' or 'ood' (out-of-distribution)
         # Init config selection for MC/MD sampling
@@ -154,17 +161,90 @@ class ActiveLearningConfig(ConfigBase):
         for key, value in self.defaults.items():
             setattr(self, key, value)
     
+    @staticmethod
+    def parse_iteration_intervals(interval_str):
+        """Parse iteration interval string into a set of integers.
+        
+        Parameters
+        ----------
+        interval_str : str
+            Comma-separated intervals, e.g. '1-5, 10-15, 17, 19'
+            
+        Returns
+        -------
+        set
+            Set of iteration numbers.
+        """
+        if not interval_str or interval_str.strip() == '':
+            return set()
+        
+        iterations = set()
+        parts = interval_str.replace(' ', '').split(',')
+        
+        for part in parts:
+            if not part:
+                continue
+            if '-' in part:
+                # Range like '1-5'
+                start, end = part.split('-')
+                iterations.update(range(int(start), int(end) + 1))
+            else:
+                # Single number like '17'
+                iterations.add(int(part))
+        
+        return iterations
+    
     def get_sampling_method(self, iteration):
-        """Determine sampling method based on iteration number."""
+        """Determine sampling method based on iteration number.
+        
+        Parameters
+        ----------
+        iteration : int
+            Current iteration number.
+            
+        Returns
+        -------
+        str
+            Sampling method name.
+            
+        Raises
+        ------
+        ValueError
+            If iteration is assigned to multiple methods (contradiction).
+        """
         if self.sampling_method_schedule != 'auto':
             return self.sampling_method_schedule
         
-        if iteration < self.perturbation_iterations:
-            return 'perturbation'
-        elif iteration <= self.mc_iterations:
-            return 'mc'
-        else:
-            return 'md'
+        # Parse iteration intervals for each method
+        methods = {
+            'perturbation': self.parse_iteration_intervals(self.perturbation_iterations),
+            'mc': self.parse_iteration_intervals(self.mc_iterations),
+            'md': self.parse_iteration_intervals(self.md_iterations),
+            'translate': self.parse_iteration_intervals(self.translate_iterations),
+        }
+        
+        # Check for contradictions (iteration in multiple methods)
+        all_iters = []
+        for method, iters in methods.items():
+            all_iters.extend(iters)
+        
+        duplicates = set(x for x in all_iters if all_iters.count(x) > 1)
+        if duplicates:
+            # Find which methods conflict
+            conflicts = []
+            for dup in sorted(duplicates):
+                conflicting = [m for m, iters in methods.items() if dup in iters]
+                conflicts.append(f"iteration {dup} in: {', '.join(conflicting)}")
+            raise ValueError(f"Sampling method contradiction detected:\n" + "\n".join(conflicts))
+        
+        # Find which method this iteration belongs to
+        for method, iters in methods.items():
+            if iteration in iters:
+                return method
+        
+        # Default fallback if iteration not explicitly assigned
+        raise ValueError(f"Iteration {iteration} not assigned to any sampling method. "
+                        f"Define it in perturbation_iterations, mc_iterations, md_iterations, or translate_iterations.")
 
 
 class SchedulerConfig(ConfigBase):
@@ -695,7 +775,8 @@ class ActiveLearningPipeline:
             candidate_data = self._sample_via_langevin(data, iteration)
         elif sampling_method == 'mc':
             candidate_data  = self.al.MC_sample( data, self.setup, self.al_config )
-            
+        elif sampling_method == 'translate':
+            candidate_data = self._sample_via_translation(data, iteration)
         else:
             raise NotImplementedError(f'Sampling method "{sampling_method}" is unknown')
         
@@ -800,6 +881,107 @@ class ActiveLearningPipeline:
         # Convert to format expected by rest of pipeline
         # Keep columns needed for DFT preparation plus Uclass
         candidate_data = sampled_df[['coords', 'at_type', 'natoms', 'lattice', 'sys_name', 'Uclass']].copy()
+        
+        return candidate_data
+    
+    def _sample_via_translation(self, data, iteration):
+        """Sample configurations by grid-based translation of molecules.
+        
+        Translates non-fixed atoms along a specified direction in discrete steps.
+        
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Current training data to start translations from.
+        iteration : int
+            Current iteration number.
+            
+        Returns
+        -------
+        candidate_data : pd.DataFrame
+            Sampled configurations from translation grid.
+        """
+        # Get translation parameters from config
+        direction = np.array(self.al_config.translate_direction, dtype=float)
+        dr = self.al_config.translate_dr
+        n_init = min(self.al_config.translate_init_configs, len(data))
+        n_steps = self.al_config.translate_steps
+        fixed_types = self.al_config.fixed_types
+        
+        # Normalize direction vector
+        direction = direction / np.linalg.norm(direction)
+        
+        print(f"Translation sampling: direction={direction}, dr={dr} Å, "
+              f"n_init={n_init}, n_steps={n_steps}")
+        
+        # Select initial configurations (similar to MD)
+        init_method = getattr(self.al_config, 'init_config_method', 'ood')
+        
+        # Compute Uclass and interactions if needed
+        if 'Uclass' not in data.columns:
+            ff.al_help.evaluate_potential(data, self.setup, 'opt')
+        ff.al_help.make_interactions(data, self.setup)
+        
+        all_indexes = np.array(data.index)
+        ndata = len(data)
+        
+        if init_method == 'ood':
+            prop_sel, _ = ff.al_help.find_histogram_uncertainty(data, data, self.setup, fixed_types)
+            prop_sel = np.nan_to_num(prop_sel, nan=0.0)
+            if prop_sel.sum() > 0:
+                prop_sel /= prop_sel.sum()
+            else:
+                prop_sel = None
+        elif init_method == 'boltzmann':
+            Uclass = data['Uclass'].to_numpy()
+            prop_sel = np.exp(-self.beta_sampling * (Uclass - Uclass.min()))
+            prop_sel /= prop_sel.sum()
+        else:
+            prop_sel = np.ones(ndata) / ndata
+        
+        try:
+            idx_chosen = np.random.choice(all_indexes, size=n_init, replace=False, p=prop_sel)
+        except ValueError:
+            idx_chosen = np.random.choice(all_indexes, size=n_init, replace=False, p=None)
+        
+        init_data = data.loc[idx_chosen].copy()
+        
+        # Generate translated configurations
+        all_configs = []
+        
+        for idx, row in init_data.iterrows():
+            coords = np.array(row['coords'], dtype=float)
+            at_type = row['at_type']
+            natoms = row['natoms']
+            lattice = row.get('lattice', None)
+            sys_name = row.get('sys_name', 'unknown')
+            
+            # Create mask for non-fixed atoms
+            mobile_mask = np.array([t not in fixed_types for t in at_type])
+            
+            # Generate translations: step 0 is original, then translate
+            for step in range(n_steps):
+                # Translation displacement for this step
+                displacement = direction * dr * step
+                
+                # Apply translation to mobile atoms
+                new_coords = coords.copy()
+                new_coords[mobile_mask] = coords[mobile_mask] + displacement
+                
+                config = {
+                    'coords': new_coords,
+                    'at_type': at_type,
+                    'natoms': natoms,
+                    'lattice': lattice,
+                    'sys_name': sys_name,
+                    'translate_step': step,
+                    'translate_distance': dr * step
+                }
+                all_configs.append(config)
+        
+        candidate_data = pd.DataFrame(all_configs)
+        print(f"Generated {len(candidate_data)} translated configurations "
+              f"({n_init} init × {n_steps} steps)")
         
         return candidate_data
     
