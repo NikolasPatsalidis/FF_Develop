@@ -983,6 +983,9 @@ class ActiveLearningPipeline:
         print(f"Generated {len(candidate_data)} translated configurations "
               f"({n_init} init × {n_steps} steps)")
         
+        # Evaluate Uclass on candidate data for selection purposes
+        ff.al_help.evaluate_potential(candidate_data, self.setup, 'opt')
+        
         return candidate_data
     
     def prepare_dft(self, iteration, selected_data):
