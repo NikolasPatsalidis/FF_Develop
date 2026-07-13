@@ -3196,7 +3196,7 @@ class al_help():
         return names
 
     @staticmethod
-    def log_to_ffdata(input_path, output_path, read_forces=True, dft_software='gaussian', identify_surface=False):
+    def log_to_ffdata(input_path, output_path, read_forces=True, dft_software='gaussian', identify_surface=False, last_config_only=True):
         """Convert DFT log files to `.ffdata` datasets.
 
         Parameters
@@ -3211,6 +3211,8 @@ class al_help():
             DFT software used: 'gaussian' or 'qespresso'.
         identify_surface : bool
             If True, detect surface orientation (111/110/100) from lattice and append to sys_name.
+        last_config_only : bool
+            If True, only extract the last (converged) configuration from each file.
         """
         GeneralFunctions.make_dir(output_path)
         
@@ -3220,7 +3222,7 @@ class al_help():
         elif dft_software.lower() in ['qespresso', 'qe', 'quantum_espresso']:
             file_ext = '.log'
             print('I am in the function log_to_ffdata looking for QE files')
-            read_func = lambda fpath: al_help._read_qe_output_to_df(fpath, read_forces=read_forces, identify_surface=identify_surface)
+            read_func = lambda fpath: al_help._read_qe_output_to_df(fpath, read_forces=read_forces, identify_surface=identify_surface, last_config_only=last_config_only)
         else:
             raise ValueError(f"Unknown DFT software: {dft_software}. Use 'gaussian' or 'qespresso'.")
         
@@ -3326,7 +3328,7 @@ class al_help():
             return 'unknown'
 
     @staticmethod
-    def _read_qe_output_to_df(filepath, read_forces=True, identify_surface=False):
+    def _read_qe_output_to_df(filepath, read_forces=True, identify_surface=False, last_config_only=True):
         """Read Quantum Espresso output file and return DataFrame.
 
         Parameters
@@ -3337,6 +3339,8 @@ class al_help():
             If True, parse forces from the output.
         identify_surface : bool
             If True, detect surface orientation from lattice and append to sys_name.
+        last_config_only : bool
+            If True, only return the last (converged) configuration.
 
         Returns
         -------
@@ -3406,8 +3410,14 @@ class al_help():
             last_lattice = lattice_list[-1] if lattice_list else None
             lattice_list = lattice_list + [last_lattice] * (n_configs - len(lattice_list))
         
+        # Determine which configurations to process
+        if last_config_only:
+            config_indices = [n_configs - 1]  # Only last (converged) configuration
+        else:
+            config_indices = range(n_configs)  # All configurations
+        
         data_rows = []
-        for i in range(n_configs):
+        for i in config_indices:
             # find a sys_name based on stoichiometry
             ats = np.array(at_types_list[i])
             u = np.unique(ats)
@@ -6157,6 +6167,7 @@ class Setup_Interfacial_Optimization():
         
         'test_descriptors': False,
         'identify_surface': False,
+        'last_config_only': True,
         
         'costf_params':"dict()",  # Measure-specific hyperparameters, e.g., {'lam': 0.3} for sMSE
         'distance_map':"dict()",
