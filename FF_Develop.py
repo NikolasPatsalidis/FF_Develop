@@ -3196,7 +3196,7 @@ class al_help():
         return names
 
     @staticmethod
-    def log_to_ffdata(input_path, output_path, read_forces=True, dft_software='gaussian'):
+    def log_to_ffdata(input_path, output_path, read_forces=True, dft_software='gaussian', identify_surface=False):
         """Convert DFT log files to `.ffdata` datasets.
 
         Parameters
@@ -3209,6 +3209,8 @@ class al_help():
             If True, parse forces from the DFT output.
         dft_software : str
             DFT software used: 'gaussian' or 'qespresso'.
+        identify_surface : bool
+            If True, detect surface orientation (111/110/100) from lattice and append to sys_name.
         """
         GeneralFunctions.make_dir(output_path)
         
@@ -3218,7 +3220,7 @@ class al_help():
         elif dft_software.lower() in ['qespresso', 'qe', 'quantum_espresso']:
             file_ext = '.log'
             print('I am in the function log_to_ffdata looking for QE files')
-            read_func = lambda fpath: al_help._read_qe_output_to_df(fpath, read_forces=read_forces)
+            read_func = lambda fpath: al_help._read_qe_output_to_df(fpath, read_forces=read_forces, identify_surface=identify_surface)
         else:
             raise ValueError(f"Unknown DFT software: {dft_software}. Use 'gaussian' or 'qespresso'.")
         
@@ -3261,7 +3263,70 @@ class al_help():
         return al_help.log_to_ffdata(input_path, output_path, read_forces, dft_software)
 
     @staticmethod
-    def _read_qe_output_to_df(filepath, read_forces=True):
+    def _identify_surface_orientation(lattice):
+        """Identify FCC surface orientation (111, 110, 100) from lattice vectors.
+        
+        Uses the angle between the first two lattice vectors (assumed in-plane):
+        - (111): ~60° or ~120° angle (hexagonal symmetry)
+        - (100): ~90° angle (square symmetry)  
+        - (110): ~90° angle but with different vector length ratio
+        
+        Parameters
+        ----------
+        lattice : np.ndarray
+            3x3 array of lattice vectors (rows are vectors).
+            
+        Returns
+        -------
+        str
+            Surface orientation: '111', '110', '100', or 'unknown'.
+        """
+        if lattice is None:
+            return 'unknown'
+        
+        lattice = np.array(lattice)
+        if lattice.shape != (3, 3):
+            return 'unknown'
+        
+        # Get in-plane vectors (first two rows)
+        v1 = lattice[0]
+        v2 = lattice[1]
+        
+        # Compute lengths
+        len1 = np.linalg.norm(v1)
+        len2 = np.linalg.norm(v2)
+        
+        if len1 < 1e-10 or len2 < 1e-10:
+            return 'unknown'
+        
+        # Compute angle between v1 and v2
+        cos_angle = np.dot(v1, v2) / (len1 * len2)
+        cos_angle = np.clip(cos_angle, -1.0, 1.0)  # Handle numerical errors
+        angle_deg = np.degrees(np.arccos(cos_angle))
+        
+        # Length ratio
+        len_ratio = max(len1, len2) / min(len1, len2)
+        
+        # Classification based on angle and length ratio
+        # (111): angle ~60° or ~120°, equal lengths
+        # (100): angle ~90°, equal lengths
+        # (110): angle ~90°, length ratio ~sqrt(2) ≈ 1.414
+        
+        if abs(angle_deg - 60) < 5 or abs(angle_deg - 120) < 5:
+            return '111'
+        elif abs(angle_deg - 90) < 5:
+            if abs(len_ratio - 1.414) < 0.15:  # sqrt(2) ratio for (110)
+                return '110'
+            elif abs(len_ratio - 1.0) < 0.15:  # equal lengths for (100)
+                return '100'
+            else:
+                # Could be (110) with different cell choice
+                return '110' if len_ratio > 1.2 else '100'
+        else:
+            return 'unknown'
+
+    @staticmethod
+    def _read_qe_output_to_df(filepath, read_forces=True, identify_surface=False):
         """Read Quantum Espresso output file and return DataFrame.
 
         Parameters
@@ -3270,6 +3335,8 @@ class al_help():
             Path to QE .out file.
         read_forces : bool
             If True, parse forces from the output.
+        identify_surface : bool
+            If True, detect surface orientation from lattice and append to sys_name.
 
         Returns
         -------
@@ -3346,6 +3413,12 @@ class al_help():
             u = np.unique(ats)
             nums = {x:np.count_nonzero( ats == x) for x in u}
             sys_name = ''.join([str(k) + str(v) for k,v in nums.items()])
+            
+            # Append surface orientation if requested
+            if identify_surface:
+                orientation = al_help._identify_surface_orientation(lattice_list[i])
+                if orientation != 'unknown':
+                    sys_name = sys_name + '_' + orientation
             #########
 
             row = {
@@ -3376,6 +3449,8 @@ class al_help():
         - `atoms`: per-atom reference energies.
         - `reference`: reference structures from `setup.struct_types`.
         - `value`: constant reference value.
+        - `sys_name`: dict mapping sys_name -> reference energy, e.g.,
+          {'Ag1C20H40_111': -123.4, 'Ag1C20H40_110': -125.6}
 
         After computing `Eref`, overwrites `data['Energy']` with interaction energy.
         """
@@ -3451,6 +3526,23 @@ class al_help():
                 # 4 end 
             elif k=='value':
                 data['Eref'] = +ref
+            elif k=='sys_name':
+                # ref is a dict mapping sys_name -> reference energy value
+                # e.g., {'Ag1C20H40_111': -123.4, 'Ag1C20H40_110': -125.6}
+                for j, dat in data.iterrows():
+                    sname = dat['sys_name']
+                    if sname in ref:
+                        data.loc[j, 'Eref'] = ref[sname]
+                    else:
+                        # Try to find partial match (base sys_name without orientation)
+                        found = False
+                        for ref_name, ref_val in ref.items():
+                            if sname.startswith(ref_name) or ref_name.startswith(sname):
+                                data.loc[j, 'Eref'] = ref_val
+                                found = True
+                                break
+                        if not found:
+                            print(f"Warning: No reference energy found for sys_name '{sname}'")
             else:
                 raise NotImplementedError('{:s} method is not implemented'.format(k))
         # final step: remove reference energy
@@ -6064,6 +6156,7 @@ class Setup_Interfacial_Optimization():
         'rho_rc': 5.5,
         
         'test_descriptors': False,
+        'identify_surface': False,
         
         'costf_params':"dict()",  # Measure-specific hyperparameters, e.g., {'lam': 0.3} for sMSE
         'distance_map':"dict()",
