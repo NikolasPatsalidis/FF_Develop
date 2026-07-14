@@ -3330,6 +3330,8 @@ class al_help():
         # (100): angle ~90°, equal lengths
         # (110): angle ~90°, length ratio ~sqrt(2) ≈ 1.414
         
+        print(f"Surface ID: angle={angle_deg:.2f}°, len_ratio={len_ratio:.3f}")
+        
         if abs(angle_deg - 60) < 5 or abs(angle_deg - 120) < 5:
             return '111'
         elif abs(angle_deg - 90) < 5:
