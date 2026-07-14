@@ -3559,6 +3559,13 @@ class al_help():
         data['Energy'] -= data['Eref']
         #print(data[['sys_name','Energy','Eref']])
         # final step end
+        
+        # Print counts per system after reference energy calculation
+        print("System counts after reference energy calculation:")
+        for sname in np.unique(data['sys_name']):
+            count = np.count_nonzero(data['sys_name'] == sname)
+            print(f"  {sname}: {count}")
+        sys.stdout.flush()
         return
 
     @staticmethod
@@ -3761,6 +3768,13 @@ class al_help():
             ix = data.index
         data = data.loc[ix] 
         print('Sampling Temperature based cleaning - Kept {:d} out of {:d} of the {:s} data'.format(len(data), n, prefix))
+        
+        # Print counts per system after data cleaning
+        print("System counts after data cleaning:")
+        for sname in np.unique(data['sys_name']):
+            count = np.count_nonzero(data['sys_name'] == sname)
+            print(f"  {sname}: {count}")
+        sys.stdout.flush()
         return data
 
 class logs():
