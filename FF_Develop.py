@@ -3309,7 +3309,9 @@ class al_help():
             return None
         import re
         # Look for 100, 110, or 111 in filename (common patterns: Au111, _111, -111)
-        match = re.search(r'(100|110|111)', str(filename))
+        # Order matters: check 110 before 100 since "110" contains "10"
+        match = re.search(r'(111|110|100)', str(filename))
+        print(f"  Surface from filename '{filename}': {match.group(1) if match else 'None'}")
         if match:
             return match.group(1)
         return None
