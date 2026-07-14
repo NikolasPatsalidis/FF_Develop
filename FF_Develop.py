@@ -2333,6 +2333,8 @@ class al_help():
         for fname in files:
             try:
                 df = Data_Manager.read_xyz('{:s}/{:s}'.format(path, fname))
+                # Store the ffdata filename for surface identification
+                df['_source_file'] = fname
                 data = pd.concat([data, df], ignore_index=True)
             except (UnicodeDecodeError, ValueError) as e:
                 print(f"Warning: Could not read {fname}: {e}")
@@ -2341,8 +2343,8 @@ class al_help():
         # Apply surface identification if requested
         if identify_surface and 'sys_name' in data.columns:
             for idx, row in data.iterrows():
-                # Prefer filename-based detection
-                filename = row.get('filename', None)
+                # Prefer filename-based detection (from original filename or ffdata filename)
+                filename = row.get('filename', None) or row.get('_source_file', None)
                 orientation = al_help._identify_surface_from_filename(filename)
                 # Fallback to lattice-based detection
                 if orientation is None and 'lattice' in data.columns:
