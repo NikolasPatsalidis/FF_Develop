@@ -2339,16 +2339,23 @@ class al_help():
                 continue
         
         # Apply surface identification if requested
-        if identify_surface and 'lattice' in data.columns and 'sys_name' in data.columns:
+        if identify_surface and 'sys_name' in data.columns:
             for idx, row in data.iterrows():
-                lattice = row.get('lattice')
-                if lattice is not None:
-                    orientation = al_help._identify_surface_orientation(lattice)
-                    if orientation != 'unknown':
-                        current_name = row['sys_name']
-                        # Only append if not already present
-                        if not current_name.endswith(f'_{orientation}'):
-                            data.loc[idx, 'sys_name'] = f"{current_name}_{orientation}"
+                # Prefer filename-based detection
+                filename = row.get('filename', None)
+                orientation = al_help._identify_surface_from_filename(filename)
+                # Fallback to lattice-based detection
+                if orientation is None and 'lattice' in data.columns:
+                    lattice = row.get('lattice')
+                    if lattice is not None:
+                        orientation = al_help._identify_surface_orientation(lattice)
+                        if orientation == 'unknown':
+                            orientation = None
+                if orientation is not None:
+                    current_name = row['sys_name']
+                    # Only append if not already present
+                    if not current_name.endswith(f'_{orientation}'):
+                        data.loc[idx, 'sys_name'] = f"{current_name}_{orientation}"
             print(f"Surface identification applied. Unique sys_names: {data['sys_name'].unique().tolist()}")
         
         return data
@@ -3281,6 +3288,31 @@ class al_help():
         return al_help.log_to_ffdata(input_path, output_path, read_forces, dft_software)
 
     @staticmethod
+    def _identify_surface_from_filename(filename):
+        """Extract surface orientation from filename.
+        
+        Looks for patterns like '111', '110', '100' in the filename.
+        
+        Parameters
+        ----------
+        filename : str
+            Filename to parse.
+            
+        Returns
+        -------
+        str
+            Surface orientation: '111', '110', '100', or None if not found.
+        """
+        if filename is None:
+            return None
+        import re
+        # Look for 100, 110, or 111 in filename (common patterns: Au111, _111, -111)
+        match = re.search(r'(100|110|111)', str(filename))
+        if match:
+            return match.group(1)
+        return None
+
+    @staticmethod
     def _identify_surface_orientation(lattice):
         """Identify FCC surface orientation (111, 110, 100) from lattice vectors.
         
@@ -3329,8 +3361,6 @@ class al_help():
         # (111): angle ~60° or ~120°, equal lengths
         # (100): angle ~90°, equal lengths
         # (110): angle ~90°, length ratio ~sqrt(2) ≈ 1.414
-        
-        print(f"Surface ID: angle={angle_deg:.2f}°, len_ratio={len_ratio:.3f}")
         
         if abs(angle_deg - 60) < 5 or abs(angle_deg - 120) < 5:
             return '111'
@@ -3444,8 +3474,14 @@ class al_help():
             
             # Append surface orientation if requested
             if identify_surface:
-                orientation = al_help._identify_surface_orientation(lattice_list[i])
-                if orientation != 'unknown':
+                # Prefer filename-based detection (more reliable)
+                orientation = al_help._identify_surface_from_filename(filepath)
+                # Fallback to lattice-based detection
+                if orientation is None:
+                    orientation = al_help._identify_surface_orientation(lattice_list[i])
+                    if orientation == 'unknown':
+                        orientation = None
+                if orientation is not None:
                     sys_name = sys_name + '_' + orientation
             #########
 
