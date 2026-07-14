@@ -3470,6 +3470,10 @@ class al_help():
         
         data['Eref'] = np.zeros(len(data),dtype=float)
         
+        print(f"Reference energy config: {references}")
+        print(f"Unique sys_names in data: {np.unique(data['sys_name']).tolist()}")
+        sys.stdout.flush()
+        
         #print(data['Energy'])
         for k, ref in references.items():
             if k =='atoms':
