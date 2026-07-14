@@ -585,7 +585,7 @@ class ActiveLearningPipeline:
             print(f'Reading iteration {n}')
             sys.stdout.flush()
             path_ffdata = f'{self.datapath}/D{n}'
-            df = self.al.data_from_directory(path_ffdata)
+            df = self.al.data_from_directory(path_ffdata, identify_surface=self.setup.identify_surface)
             self.al.make_absolute_Energy_to_interaction(df, self.setup)
             data = pd.concat([data, df], ignore_index=True)
         
@@ -1370,7 +1370,7 @@ eval $linecm
         
         self.al.log_to_ffdata(path_log, path_ffdata, dft_software=self.dft_config.software)
         
-        data = self.al.data_from_directory(path_ffdata)
+        data = self.al.data_from_directory(path_ffdata, identify_surface=self.setup.identify_surface)
         self.al.make_absolute_Energy_to_interaction(data, self.setup)
 
         predicted_costs = self.al.predict_model(data, self.setup)
@@ -1498,7 +1498,7 @@ def run_init_model_tests(pipeline):
         print(f'ERROR: Data directory {path_ffdata} not found. Cannot run tests.')
         return
     
-    data = pipeline.al.data_from_directory(path_ffdata)
+    data = pipeline.al.data_from_directory(path_ffdata, identify_surface=pipeline.setup.identify_surface)
     pipeline.al.make_absolute_Energy_to_interaction(data, pipeline.setup)
     
     if len(data) == 0:

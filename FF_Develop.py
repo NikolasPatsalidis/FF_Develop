@@ -2303,7 +2303,7 @@ class al_help():
 
 
     @staticmethod
-    def data_from_directory(path, file_ext=None):
+    def data_from_directory(path, file_ext=None, identify_surface=False):
         """Load a directory of data files into a single DataFrame.
 
         Parameters
@@ -2313,6 +2313,8 @@ class al_help():
         file_ext : str, optional
             File extension to filter (e.g., '.ffdata', '.xyz'). 
             If None, reads all files.
+        identify_surface : bool
+            If True, detect surface orientation from lattice and append to sys_name.
 
         Returns
         -------
@@ -2335,6 +2337,20 @@ class al_help():
             except (UnicodeDecodeError, ValueError) as e:
                 print(f"Warning: Could not read {fname}: {e}")
                 continue
+        
+        # Apply surface identification if requested
+        if identify_surface and 'lattice' in data.columns and 'sys_name' in data.columns:
+            for idx, row in data.iterrows():
+                lattice = row.get('lattice')
+                if lattice is not None:
+                    orientation = al_help._identify_surface_orientation(lattice)
+                    if orientation != 'unknown':
+                        current_name = row['sys_name']
+                        # Only append if not already present
+                        if not current_name.endswith(f'_{orientation}'):
+                            data.loc[idx, 'sys_name'] = f"{current_name}_{orientation}"
+            print(f"Surface identification applied. Unique sys_names: {data['sys_name'].unique().tolist()}")
+        
         return data
     
 
