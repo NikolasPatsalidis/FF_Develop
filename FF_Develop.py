@@ -3325,10 +3325,10 @@ class al_help():
     def _identify_surface_orientation(lattice):
         """Identify FCC surface orientation (111, 110, 100) from lattice vectors.
         
-        Uses the angle between the first two lattice vectors (assumed in-plane):
-        - (111): ~60° or ~120° angle (hexagonal symmetry)
-        - (100): ~90° angle (square symmetry)  
-        - (110): ~90° angle but with different vector length ratio
+        Classifies based on angle and lengths of in-plane basis vectors:
+        - (111): ~60° angle (hexagonal/triangular lattice)
+        - (100): ~90° angle with equal lengths (square lattice)
+        - (110): ~90° angle with different lengths (rectangular lattice)
         
         Parameters
         ----------
@@ -3351,36 +3351,34 @@ class al_help():
         v1 = lattice[0]
         v2 = lattice[1]
         
-        # Compute lengths
-        len1 = np.linalg.norm(v1)
-        len2 = np.linalg.norm(v2)
+        # Calculate vector lengths
+        len_v1 = np.linalg.norm(v1)
+        len_v2 = np.linalg.norm(v2)
         
-        if len1 < 1e-10 or len2 < 1e-10:
+        if len_v1 < 1e-10 or len_v2 < 1e-10:
             return 'unknown'
         
-        # Compute angle between v1 and v2
-        cos_angle = np.dot(v1, v2) / (len1 * len2)
-        cos_angle = np.clip(cos_angle, -1.0, 1.0)  # Handle numerical errors
-        angle_deg = np.degrees(np.arccos(cos_angle))
+        # Compute angle in degrees
+        dot_product = np.dot(v1, v2)
+        cos_theta = dot_product / (len_v1 * len_v2)
+        cos_theta = np.clip(cos_theta, -1.0, 1.0)
+        angle = np.degrees(np.arccos(cos_theta))
         
-        # Length ratio
-        len_ratio = max(len1, len2) / min(len1, len2)
+        # Standardize angle to be between 0 and 90 for easier matching
+        acute_angle = angle if angle <= 90 else 180 - angle
         
-        # Classification based on angle and length ratio
-        # (111): angle ~60° or ~120°, equal lengths
-        # (100): angle ~90°, equal lengths
-        # (110): angle ~90°, length ratio ~sqrt(2) ≈ 1.414
+        print(f"    Vector lengths: {len_v1:.4f}, {len_v2:.4f}, Angle: {angle:.2f}° (Acute: {acute_angle:.2f}°)")
         
-        if abs(angle_deg - 60) < 5 or abs(angle_deg - 120) < 5:
-            return '111'
-        elif abs(angle_deg - 90) < 5:
-            if abs(len_ratio - 1.414) < 0.15:  # sqrt(2) ratio for (110)
-                return '110'
-            elif abs(len_ratio - 1.0) < 0.15:  # equal lengths for (100)
-                return '100'
+        # Classification logic
+        tol = 1e-2
+        
+        if np.isclose(acute_angle, 90.0, atol=tol):
+            if np.isclose(len_v1, len_v2, atol=tol):
+                return '100'  # Square lattice
             else:
-                # Could be (110) with different cell choice
-                return '110' if len_ratio > 1.2 else '100'
+                return '110'  # Rectangular lattice
+        elif np.isclose(acute_angle, 60.0, atol=tol):
+            return '111'  # Hexagonal/triangular lattice
         else:
             return 'unknown'
 
