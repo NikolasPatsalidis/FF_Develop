@@ -2345,14 +2345,19 @@ class al_help():
             for idx, row in data.iterrows():
                 # Prefer filename-based detection (from original filename or ffdata filename)
                 filename = row.get('filename', None) or row.get('_source_file', None)
-                orientation = al_help._identify_surface_from_filename(filename)
-                # Fallback to lattice-based detection
-                if orientation is None and 'lattice' in data.columns:
+                orientation_file = al_help._identify_surface_from_filename(filename)
+                # Also run lattice-based detection for comparison
+                orientation_lattice = None
+                if 'lattice' in data.columns:
                     lattice = row.get('lattice')
                     if lattice is not None:
-                        orientation = al_help._identify_surface_orientation(lattice)
-                        if orientation == 'unknown':
-                            orientation = None
+                        orientation_lattice = al_help._identify_surface_orientation(lattice)
+                        if orientation_lattice == 'unknown':
+                            orientation_lattice = None
+                # Print comparison
+                print(f"    Lattice-based: {orientation_lattice}")
+                # Use filename-based, fallback to lattice-based
+                orientation = orientation_file if orientation_file is not None else orientation_lattice
                 if orientation is not None:
                     current_name = row['sys_name']
                     # Only append if not already present
