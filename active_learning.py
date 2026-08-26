@@ -922,27 +922,42 @@ class ActiveLearningPipeline:
             ff.al_help.evaluate_potential(data, self.setup, 'opt')
         ff.al_help.make_interactions(data, self.setup)
         
-        all_indexes = np.array(data.index)
-        ndata = len(data)
+        # Select initial configs PER sys_name to ensure all systems are represented
+        unique_sys_names = data['sys_name'].unique()
+        n_systems = len(unique_sys_names)
+        n_per_system = max(1, n_init // n_systems)
         
-        if init_method == 'ood':
-            prop_sel, _ = ff.al_help.find_histogram_uncertainty(data, data, self.setup, fixed_types)
-            prop_sel = np.nan_to_num(prop_sel, nan=0.0)
-            if prop_sel.sum() > 0:
+        idx_chosen_list = []
+        for sys_name in unique_sys_names:
+            sys_mask = data['sys_name'] == sys_name
+            sys_data = data[sys_mask]
+            sys_indexes = np.array(sys_data.index)
+            n_sys = len(sys_indexes)
+            n_select = min(n_per_system, n_sys)
+            
+            if init_method == 'ood':
+                prop_sel, _ = ff.al_help.find_histogram_uncertainty(sys_data, sys_data, self.setup, fixed_types)
+                prop_sel = np.nan_to_num(prop_sel, nan=0.0)
+                if prop_sel.sum() > 0:
+                    prop_sel /= prop_sel.sum()
+                else:
+                    prop_sel = None
+            elif init_method == 'boltzmann':
+                Uclass = sys_data['Uclass'].to_numpy()
+                prop_sel = np.exp(-self.beta_sampling * (Uclass - Uclass.min()))
                 prop_sel /= prop_sel.sum()
             else:
                 prop_sel = None
-        elif init_method == 'boltzmann':
-            Uclass = data['Uclass'].to_numpy()
-            prop_sel = np.exp(-self.beta_sampling * (Uclass - Uclass.min()))
-            prop_sel /= prop_sel.sum()
-        else:
-            prop_sel = np.ones(ndata) / ndata
+            
+            try:
+                idx_sys = np.random.choice(sys_indexes, size=n_select, replace=False, p=prop_sel)
+            except ValueError:
+                idx_sys = np.random.choice(sys_indexes, size=n_select, replace=False, p=None)
+            idx_chosen_list.extend(idx_sys)
         
-        try:
-            idx_chosen = np.random.choice(all_indexes, size=n_init, replace=False, p=prop_sel)
-        except ValueError:
-            idx_chosen = np.random.choice(all_indexes, size=n_init, replace=False, p=None)
+        idx_chosen = np.array(idx_chosen_list)
+        print(f"Selected {len(idx_chosen)} initial configs across {n_systems} systems "
+              f"({n_per_system} per system)")
         
         init_data = data.loc[idx_chosen].copy()
         
